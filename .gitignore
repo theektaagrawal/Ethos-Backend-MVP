@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+
+# Env files
+.env
+
+# Scratch / test files
+scratch/
+test_*.py
+test_*.js
+test.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
