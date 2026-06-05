@@ -6,5 +6,6 @@ scratch/
 test_*
 data/
 *.txt
+!requirements.txt
 .git
 .gitignore
