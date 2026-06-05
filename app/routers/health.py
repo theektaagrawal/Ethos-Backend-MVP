@@ -3,6 +3,7 @@ from app.services.openrag_client import get_openrag_client
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
+@router.get("")
 @router.get("/")
 async def health_check():
     client = get_openrag_client()

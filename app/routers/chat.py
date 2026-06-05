@@ -4,10 +4,12 @@ from app.services.chat_service import ChatService, get_chat_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+@router.post("")
 @router.post("/")
 async def chat(request: ChatRequest, service: ChatService = Depends(get_chat_service)):
     return await service.chat(request)
 
+@router.get("")
 @router.get("/")
 async def list_conversations(service: ChatService = Depends(get_chat_service)):
     return await service.list_conversations()

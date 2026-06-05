@@ -5,6 +5,7 @@ from app.services.persona_service import PersonaService, get_persona_service
 
 router = APIRouter(prefix="/api/personas", tags=["personas"])
 
+@router.get("", response_model=List[Persona])
 @router.get("/", response_model=List[Persona])
 async def list_personas(service: PersonaService = Depends(get_persona_service)):
     return service.list_personas()

@@ -5,6 +5,7 @@ from app.services.openrag_client import get_openrag_client, OpenRAGClient
 
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
 
+@router.get("")
 @router.get("/")
 async def list_connectors(client: OpenRAGClient = Depends(get_openrag_client)):
     response = await client.client.get("/connectors")
