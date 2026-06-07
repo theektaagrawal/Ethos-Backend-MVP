@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import health, personas, chat, knowledge, upload, connectors, auth
+from app.routers import health, personas, chat, knowledge, upload, connectors, auth, validator
 from app.database import engine
 from app.models.user import Base
 
@@ -23,6 +23,7 @@ app.include_router(chat.router)
 app.include_router(knowledge.router)
 app.include_router(upload.router)
 app.include_router(connectors.router)
+app.include_router(validator.router)
 
 @app.on_event("startup")
 async def startup_event():
