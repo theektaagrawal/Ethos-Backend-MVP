@@ -101,30 +101,50 @@ async def list_documents(client: OpenRAGClient = Depends(get_openrag_client)):
 @router.get("/stats")
 async def get_stats(client: OpenRAGClient = Depends(get_openrag_client)):
     try:
-        docs = await discover_openrag_documents(client)
-        total_docs = len(docs)
+        from app.services.document_store import load_documents
+        local_docs = load_documents()
         
-        # Simple mock logic for vectors based on doc count/size
-        vectors = sum([d.get("size", 1000) // 100 for d in docs]) or total_docs * 10
+        openrag_docs = await discover_openrag_documents(client)
+        total_docs = len(openrag_docs)
         
-        # Last sync
-        last_sync = docs[-1].get("created_at") if docs else "Unknown"
-        if last_sync != "Unknown":
-            from datetime import datetime
-            try:
-                # Format iso to a nicer string if possible
-                dt = datetime.fromisoformat(last_sync)
-                last_sync = dt.strftime("%Y-%m-%d %H:%M")
-            except:
-                pass
+        # Vectors: Deterministic calculation based on local docs size
+        vectors = sum([max(1, d.get("size", 1000) // 1000) for d in local_docs])
+        if vectors == 0 and total_docs > 0:
+             vectors = total_docs * 10
+        
+        # Last Sync: Max created_at from local docs
+        last_sync = "Unknown"
+        valid_dates = []
+        for d in local_docs:
+            created_at = d.get("created_at")
+            if created_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(created_at)
+                    valid_dates.append(dt)
+                except Exception:
+                    pass
+        if valid_dates:
+            last_sync = max(valid_dates).strftime("%Y-%m-%d %H:%M")
+
+        # Integrity
+        openrag_count = len(openrag_docs)
+        local_count = len(local_docs)
+        if local_count == 0:
+            integrity = 100 if openrag_count == 0 else 0
+        else:
+            integrity = min(100, int((openrag_count / local_count) * 100))
 
         return {
             "total_documents": total_docs,
             "vectors": vectors,
-            "last_sync": last_sync
+            "last_sync": last_sync,
+            "integrity": integrity
         }
-    except Exception:
-        return {"total_documents": 0, "vectors": 0, "last_sync": "Unknown"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"total_documents": 0, "vectors": 0, "last_sync": "Unknown", "integrity": 100}
 
 @router.get("/brand-graph")
 async def get_brand_graph(client: OpenRAGClient = Depends(get_openrag_client)):

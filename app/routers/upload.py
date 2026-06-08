@@ -149,6 +149,64 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
         os.remove(tmp_path)
     # ----------------------------------------------------------------------
     
+    # --- Check for PDF files and extract them using OpenAI ---
+    is_pdf = False
+    if actual_filename.lower().endswith('.pdf') or actual_content_type == 'application/pdf':
+        is_pdf = True
+        
+    if is_pdf:
+        import openai
+        import os
+        import tempfile
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        suffix = os.path.splitext(actual_filename)[1] or '.pdf'
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+            
+        try:
+            with open(tmp_path, "rb") as pdf_file:
+                uploaded_file = openai_client.files.create(
+                    file=pdf_file,
+                    purpose="assistants"
+                )
+            
+            messages = [
+                {"role": "system", "content": "You are a Document Analysis AI. Your job is to produce a highly detailed markdown document describing this file. Extract all text accurately, preserve headings, formatting, and tables where possible."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extract the complete contents of this PDF into markdown."},
+                    {"type": "file", "file": {"file_id": uploaded_file.id}}
+                ]}
+            ]
+            
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_completion_tokens=4000
+            )
+            final_content = response.choices[0].message.content
+            
+            content = final_content.encode('utf-8')
+            actual_filename = os.path.splitext(actual_filename)[0] + ".md"
+            actual_content_type = "text/markdown"
+            
+            # Clean up OpenAI file
+            try:
+                openai_client.files.delete(uploaded_file.id)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            os.remove(tmp_path)
+            raise e
+            
+        os.remove(tmp_path)
+    # ----------------------------------------------------------------------
+    
     import unicodedata
     safe_filename = unicodedata.normalize('NFKD', actual_filename).encode('ascii', 'ignore').decode('ascii')
     if not safe_filename.strip():
