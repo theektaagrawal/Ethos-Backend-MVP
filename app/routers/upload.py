@@ -40,7 +40,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             response = openai_client.chat.completions.create(
                 model="gpt-5-mini",
                 messages=messages,
-                max_completion_tokens=4000
+                max_completion_tokens=32000
             )
             final_content = response.choices[0].message.content
             
@@ -129,7 +129,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
                 response = openai_client.chat.completions.create(
                     model="gpt-5-mini",
                     messages=messages,
-                    max_completion_tokens=4000
+                    max_completion_tokens=32000
                 )
                 final_content = response.choices[0].message.content
             else:
@@ -184,9 +184,9 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             ]
             
             response = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5-mini",
                 messages=messages,
-                max_completion_tokens=4000
+                max_completion_tokens=32000
             )
             final_content = response.choices[0].message.content
             
