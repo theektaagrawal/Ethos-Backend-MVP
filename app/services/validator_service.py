@@ -28,7 +28,7 @@ Example Output:
 }}
 """
         response = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5-mini",
             response_format={"type": "json_object"},
             messages=[
                 {
@@ -108,7 +108,7 @@ Example Output:
 }}
 """
         response = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5-mini",
             response_format={"type": "json_object"},
             messages=[
                 {
@@ -127,7 +127,35 @@ Example Output:
         )
         
         content = response.choices[0].message.content
-        return json.loads(content)
+        audit_data = json.loads(content)
+
+        # Generate simulated stakeholder feedback based on the audit
+        feedback_prompt = f"""You are simulating the reactions of three key stakeholders to a drafted brand image that has just been audited.
+Original Description: {description}
+Violations found: {audit_data.get('rejections', [])}
+Suggested Improvements: {audit_data.get('improvements', [])}
+
+Provide a short, 1-2 sentence realistic, in-character reaction from each of these three roles reacting to the draft's flaws. They should sound like they are reviewing the draft and agreeing with the audit findings.
+- Founder: Focuses on core ethos, mission, and long-term brand legacy.
+- CBO (Chief Brand Officer): Focuses on alignment with brand guidelines, color palettes, and structural correctness.
+- Brand Critic: A slightly skeptical external or internal voice who is hard to please, focusing on avoiding genericness, contrast, and subtle aesthetic nuances.
+
+Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
+"""
+        feedback_response = await self.openai_client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": feedback_prompt}]
+        )
+
+        feedback_data = json.loads(feedback_response.choices[0].message.content)
+        audit_data["reviews"] = {
+            "Founder": feedback_data.get("founder", "This draft misses our core ethos. Let's apply these fixes."),
+            "CBO": feedback_data.get("cbo", "The guidelines are clear. We need to correct these structural issues immediately."),
+            "Brand Critic": feedback_data.get("brand_critic", "Too generic. Hopefully the improvements will give it some actual character.")
+        }
+
+        return audit_data
 
     async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list):
         if "," in image_base64:
@@ -155,8 +183,11 @@ Example Output:
             prompt=prompt
         )
         
-        image_base64 = result.data[0].b64_json
-        return {"image_base64": f"data:image/png;base64,{image_base64}"}
+        new_image_base64 = result.data[0].b64_json
+
+        return {
+            "image_base64": f"data:image/png;base64,{new_image_base64}"
+        }
 
 _validator_service_instance = None
 
