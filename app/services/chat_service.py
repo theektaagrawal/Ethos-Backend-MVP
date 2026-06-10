@@ -11,6 +11,7 @@ from app.services.persona_service import get_persona_service
 from app.services.openrag_client import get_openrag_client
 from app.services.langflow_client import get_langflow_client
 from dotenv import load_dotenv
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ class ChatService:
             async def os_stream_generator():
                 try:
                     stream_response = await openai_client.chat.completions.create(
-                        model="gpt-5-mini",
+                        model=settings.openai_chat_model,
                         messages=[
                             {"role": "system", "content": os_persona.system_prompt},
                             {"role": "user", "content": synthesize_prompt}
@@ -169,7 +170,7 @@ class ChatService:
         else:
             try:
                 response = await openai_client.chat.completions.create(
-                    model="gpt-5-mini",
+                    model=settings.openai_chat_model,
                     messages=[
                         {"role": "system", "content": os_persona.system_prompt},
                         {"role": "user", "content": synthesize_prompt}

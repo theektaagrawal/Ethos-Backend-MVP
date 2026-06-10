@@ -1,16 +1,20 @@
 import asyncio
 import base64
+import time
+import json
 from openai import AsyncOpenAI
 from app.services.openrag_client import get_openrag_client
 from app.config import settings
 
 # Brand-relevant search queries to pull holistic brand context
 BRAND_CONTEXT_QUERIES = [
-    "brand aesthetics visual style photography guidelines",
-    "brand voice tone language copywriting rules",
-    "brand refusals never do constraints prohibitions",
-    "brand heritage origin identity core values",
-    "brand taste product design sensibility material preferences",
+    "What are the guidelines for the brand trademark and logo?",
+    "What is the primary brand color palette?",
+    "What are the brand aesthetics, visual style, and photography guidelines?",
+    "What are the rules for brand voice, tone, language, and copywriting?",
+    "What are the brand's 'never do's', constraints, and prohibitions?",
+    "What is the brand's heritage, origin, identity, and core values?",
+    "What are the preferences for brand taste, product design sensibility, and materials?",
 ]
 
 
@@ -25,12 +29,13 @@ class GeneratorService:
         async def search(query: str):
             try:
                 response = await self.openrag_client.client.post(
-                    "/v1/search",
-                    json={"query": query, "limit": 5, "score_threshold": 0},
+                    "/v1/chat",
+                    json={"message": query},
                 )
                 if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    return [r.get("text", "").strip() for r in results if r.get("text")]
+                    chat_response = response.json().get("response", "").strip()
+                    if chat_response:
+                        return [chat_response]
             except Exception:
                 pass
             return []
@@ -57,34 +62,50 @@ class GeneratorService:
         Enriches the user prompt with brand guidelines from OpenRAG,
         then generates an image with gpt-image-2.
         """
+        yield f"data: {json.dumps({'status': 'Fetching brand guidelines from Ethos...'})}\n\n"
         brand_guidelines = await self._fetch_brand_guidelines()
 
-        enriched_prompt = f"""You are a professional creative director generating brand-compliant imagery.
+        yield f"data: {json.dumps({'status': 'Generating image with brand context...'})}\n\n"
 
-=== BRAND GUIDELINES ===
+        enriched_prompt = f"""<role_definition>
+You are a professional creative director generating brand-compliant imagery.
+</role_definition>
+
+<brand_guidelines>
 {brand_guidelines}
-=== END BRAND GUIDELINES ===
+</brand_guidelines>
 
-=== USER REQUEST ===
+<user_request>
 {user_prompt}
-=== END USER REQUEST ===
+</user_request>
 
-Generate an image that faithfully executes the user request while strictly adhering to the brand guidelines above.
+<instructions>
+Generate a photorealistic, high-fidelity image that faithfully executes the user request while strictly adhering to the brand guidelines above.
+Structure your generation conceptually as: background/scene → subject → key details → constraints.
 Ensure the result feels premium, authentic, and wholly aligned with the brand's aesthetic philosophy, voice, and refusals.
+</instructions>
 """
 
+        if settings.debug:
+            print("--- DEBUG: GENERATOR SERVICE PROMPT ---")
+            print(enriched_prompt)
+            print("---------------------------------------")
+            start_time = time.time()
+
         result = await self.openai_client.images.generate(
-            model="gpt-image-2",
+            model=settings.openai_image_model,
             prompt=enriched_prompt,
             n=1,
             size="1024x1024",
+            quality="high",
         )
 
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: GENERATOR API CALL TOOK {elapsed:.2f} seconds ---")
+
         image_b64 = result.data[0].b64_json
-        return {
-            "image_base64": f"data:image/png;base64,{image_b64}",
-            "brand_context_used": len(brand_guidelines) > 0,
-        }
+        yield f"data: {json.dumps({'status': 'Complete', 'result': {'image_base64': f'data:image/png;base64,{image_b64}', 'brand_context_used': len(brand_guidelines) > 0}})}\n\n"
 
 
 _generator_service_instance = None

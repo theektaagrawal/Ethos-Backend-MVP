@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from app.services.openrag_client import get_openrag_client, OpenRAGClient
 from pydantic import BaseModel
+from app.config import settings
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -38,7 +39,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             ]
             
             response = openai_client.chat.completions.create(
-                model="gpt-5-mini",
+                model=settings.openai_chat_model,
                 messages=messages,
                 max_completion_tokens=32000
             )
@@ -74,7 +75,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
         try:
             with open(tmp_path, "rb") as audio_file:
                 transcript = openai_client.audio.transcriptions.create(
-                    model="whisper-1", 
+                    model=settings.openai_audio_model, 
                     file=audio_file
                 )
                 
@@ -127,7 +128,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
                     })
                     
                 response = openai_client.chat.completions.create(
-                    model="gpt-5-mini",
+                    model=settings.openai_chat_model,
                     messages=messages,
                     max_completion_tokens=32000
                 )
@@ -184,7 +185,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             ]
             
             response = openai_client.chat.completions.create(
-                model="gpt-5-mini",
+                model=settings.openai_chat_model,
                 messages=messages,
                 max_completion_tokens=32000
             )

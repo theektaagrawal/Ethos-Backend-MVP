@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import asyncio
+import time
 from openai import AsyncOpenAI
 from app.services.openrag_client import get_openrag_client
 from app.routers.knowledge import BRAND_PRIMITIVES
@@ -16,19 +17,41 @@ class ValidatorService:
         self.openai_client = AsyncOpenAI(api_key=api_key)
 
     async def _analyze_image_for_queries(self, image_base64: str, description: str) -> list[str]:
-        prompt = f"""Analyze the visual contents, aesthetic, themes, and specific elements present in this draft image.
-Description: {description}
+        prompt = f"""<role_definition>
+You are a visual analyzer. Your job is to analyze the visual contents, aesthetic, themes, and specific elements present in this draft image to determine what brand rules we should look up.
+</role_definition>
 
-Output ONLY a JSON object with a single key "queries" containing a list of 3-5 short search queries we can use to look up the brand's rules regarding these specific elements.
-Example elements to notice: lighting style, presence of models/celebrities, specific colors, packaging types (ribbons, boxes), text elements, logos, etc.
+<draft_description>
+{description}
+</draft_description>
+
+<instructions>
+Analyze the visual details of the image. Identify key elements such as:
+- Lighting style
+- Presence of models or celebrities
+- Specific colors
+- Packaging types (ribbons, boxes, etc.)
+- Text elements, logos, and voice
+</instructions>
+
+<structured_output_contract>
+Output ONLY a JSON object with a single key "queries" containing a list of 3-5 conversational questions we can ask a brand agent to look up the rules regarding these specific elements. Do not wrap in markdown or write explanation.
 
 Example Output:
 {{
-  "queries": ["celebrity endorsement", "bright studio lighting", "ribbon wrapping", "exclamation marks in text"]
+  "queries": ["What are the rules regarding celebrity endorsements?", "What lighting style should be used for product photography?", "Are there specific rules for ribbon wrapping on packaging?", "Is it allowed to use exclamation marks in copy?"]
 }}
+</structured_output_contract>
 """
+        if settings.debug:
+            print("--- DEBUG: VALIDATOR QUERY PROMPT ---")
+            print(prompt)
+            print("-------------------------------------")
+            start_time = time.time()
+
         response = await self.openai_client.chat.completions.create(
-            model="gpt-5-mini",
+            model=settings.openai_chat_model,
+            temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
                 {
@@ -40,8 +63,17 @@ Example Output:
                 }
             ]
         )
+        
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: VALIDATOR QUERY API CALL TOOK {elapsed:.2f} seconds ---")
+
         content = response.choices[0].message.content
         data = json.loads(content)
+        
+        if settings.debug:
+            print(f"--- DEBUG: QUERIES EXTRACTED: {data.get('queries', [])} ---")
+            
         return data.get("queries", [])
 
     async def _get_targeted_brand_knowledge(self, queries: list[str]) -> str:
@@ -51,24 +83,31 @@ Example Output:
         async def search_query(query):
             try:
                 response = await self.openrag_client.client.post(
-                    "/v1/search",
-                    json={"query": query, "limit": 4, "score_threshold": 0},
+                    "/v1/chat",
+                    json={"message": query},
                 )
                 if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    snippets = [item.get("text", "").strip() for item in results if item.get("text")]
-                    return query, snippets
+                    chat_response = response.json().get("response", "").strip()
+                    if chat_response:
+                        return query, [chat_response]
             except Exception:
                 pass
             return query, []
 
+        if settings.debug:
+            start_time = time.time()
+            
         query_results = await asyncio.gather(*(search_query(q) for q in queries))
+        
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: OPENRAG QUERIES TOOK {elapsed:.2f} seconds ---")
         
         for query, snippets in query_results:
             if snippets:
                 context_parts.append(f"--- Context for: {query} ---")
                 for snippet in snippets:
-                    context_parts.append(snippet[:500]) # Keep it bounded
+                    context_parts.append(snippet)
 
         return "\n".join(context_parts)
 
@@ -77,38 +116,67 @@ Example Output:
         if "," in image_base64:
             image_base64 = image_base64.split(",")[1]
 
+        yield f"data: {json.dumps({'status': 'Analyzing visual elements...'})}\n\n"
         # Step 1: Analyze image to generate targeted queries
         queries = await self._analyze_image_for_queries(image_base64, description)
         
-        # Step 2: Fetch targeted brand knowledge
+        yield f"data: {json.dumps({'status': 'Consulting OpenRAG Agent for brand rules...'})}\n\n"
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
         
-        prompt = f"""You are a strict brand guardian and creative director for the house.
-Your ONLY job is to audit the provided draft image against our strict brand rules and primitives. 
-Do NOT invent generic fashion advice or marketing cliches. Every improvement or rejection MUST be directly rooted in a specific rule, refusal, or philosophy found in the Brand Knowledge Context below.
+        yield f"data: {json.dumps({'status': 'Auditing against brand guidelines...'})}\n\n"
+        
+        prompt = f"""<role_definition>
+You are a strict brand guardian and creative director. Your sole job is to audit the provided draft image against our strict brand rules and primitives.
+</role_definition>
 
-### Brand Knowledge Context:
+<grounding_rules>
+- Do NOT invent generic fashion advice, creative feedback, or marketing clichés.
+- Every suggested improvement or rejection MUST be directly rooted in a specific rule, refusal, or philosophy found in the <brand_knowledge_context> below.
+- If the brand knowledge context is insufficient or irrelevant to an element in the image, do not create a rejection or improvement for that element.
+</grounding_rules>
+
+<missing_context_gating>
+- If required brand context is missing to evaluate an element, do NOT guess.
+- Label any assumptions explicitly.
+</missing_context_gating>
+
+<brand_knowledge_context>
 {brand_knowledge}
+</brand_knowledge_context>
 
-### Draft Description from user:
+<draft_description>
 {description}
+</draft_description>
 
-Analyze the provided image. 
-1. Does it violate any of the specific refusals, voice guidelines, or aesthetic rules in the context? (e.g., using banned words/elements, looking too commercial, complex "luxury unboxing" style, celebrity focus, etc.).
-2. How can it be improved to strictly reflect the core principles (e.g., "Less, but for a longer time", silence, restraint)?
+<instructions>
+Analyze the visual content of the provided image and its description.
+1. Identify if it violates any specific refusals, voice guidelines, or aesthetic rules in the context.
+2. Formulate highly specific, literal visual instructions for how the image MUST be edited to fix these violations. Do not use generic creative-director feedback (like "Simplify the composition"); instead, dictate exactly what needs to change visually.
+</instructions>
 
+<structured_output_contract>
 Return ONLY a JSON object with two keys:
-- "improvements": A list of strings, each detailing a specific visual or thematic improvement to align with the brand. You MUST reference the specific brand rule you are applying.
-- "rejections": A list of strings, each detailing a specific element in the draft that violates brand rules. You MUST reference the specific brand rule that is being violated.
+- "improvements": A list of strings, each providing a concrete, literal visual instruction for DALL-E to edit the image. You MUST cite the specific document from the context for each improvement (e.g., "Change the headline text to 'Escape to nature' using Work Sans Regular. [Source: BrandBook.pdf]").
+- "rejections": A list of strings, each detailing a specific element in the draft that violates brand rules. You MUST cite the specific document from the context (e.g., "[Source: BrandBook.pdf]").
+
+Do not add any prose or markdown formatting outside of the JSON object.
+</structured_output_contract>
 
 Example Output:
 {{
-  "improvements": ["Remove the exclamation marks to align with the brand's 'What We Never Say' guidelines.", "Simplify the composition to reflect the 'Less, but for a longer time' philosophy."],
+  "improvements": ["Remove the exclamation marks from the text.", "Replace the complex packaging with a plain matte black box."],
   "rejections": ["The image features a celebrity, which violates the 'Celebrity Dressing' refusal rule.", "The packaging looks too complex, conflicting with our restrained, durable packaging standards."]
 }}
 """
+        if settings.debug:
+            print("--- DEBUG: AUDIT PROMPT ---")
+            print(prompt)
+            print("---------------------------")
+            start_time = time.time()
+
         response = await self.openai_client.chat.completions.create(
-            model="gpt-5-mini",
+            model=settings.openai_chat_model,
+            temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
                 {
@@ -126,27 +194,53 @@ Example Output:
             ]
         )
         
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: AUDIT API CALL TOOK {elapsed:.2f} seconds ---")
+        
         content = response.choices[0].message.content
         audit_data = json.loads(content)
 
+        yield f"data: {json.dumps({'status': 'Gathering stakeholder feedback...'})}\n\n"
+
         # Generate simulated stakeholder feedback based on the audit
-        feedback_prompt = f"""You are simulating the reactions of three key stakeholders to a drafted brand image that has just been audited.
+        feedback_prompt = f"""<role_definition>
+You are simulating the reactions of three key stakeholders to a drafted brand image that has just been audited.
+</role_definition>
+
+<context>
 Original Description: {description}
 Violations found: {audit_data.get('rejections', [])}
 Suggested Improvements: {audit_data.get('improvements', [])}
+</context>
 
+<instructions>
 Provide a short, 1-2 sentence realistic, in-character reaction from each of these three roles reacting to the draft's flaws. They should sound like they are reviewing the draft and agreeing with the audit findings.
 - Founder: Focuses on core ethos, mission, and long-term brand legacy.
 - CBO (Chief Brand Officer): Focuses on alignment with brand guidelines, color palettes, and structural correctness.
 - Brand Critic: A slightly skeptical external or internal voice who is hard to please, focusing on avoiding genericness, contrast, and subtle aesthetic nuances.
+</instructions>
 
-Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
+<structured_output_contract>
+Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic". Do not add any markdown formatting or explanation outside the JSON.
+</structured_output_contract>
 """
+        if settings.debug:
+            print("--- DEBUG: STAKEHOLDER FEEDBACK PROMPT ---")
+            print(feedback_prompt)
+            print("------------------------------------------")
+            start_time = time.time()
+
         feedback_response = await self.openai_client.chat.completions.create(
-            model="gpt-5-mini",
+            model=settings.openai_chat_model,
+            temperature=0.0,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": feedback_prompt}]
         )
+
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: STAKEHOLDER FEEDBACK API CALL TOOK {elapsed:.2f} seconds ---")
 
         feedback_data = json.loads(feedback_response.choices[0].message.content)
         audit_data["reviews"] = {
@@ -155,7 +249,10 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             "Brand Critic": feedback_data.get("brand_critic", "Too generic. Hopefully the improvements will give it some actual character.")
         }
 
-        return audit_data
+        if settings.debug:
+            print(f"--- DEBUG: FULL AUDIT RESULT: {json.dumps(audit_data, indent=2)} ---")
+
+        yield f"data: {json.dumps({'status': 'Complete', 'result': audit_data})}\n\n"
 
     async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list):
         if "," in image_base64:
@@ -163,31 +260,74 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             
         image_bytes = base64.b64decode(image_base64)
         
-        prompt = f"Original Idea: {description}\n\n"
-        
-        if rejections:
-            prompt += "THINGS TO AVOID (Rejections from previous draft):\n"
-            for r in rejections:
-                prompt += f"- {r}\n"
-                
-        if improvements:
-            prompt += "\nMANDATORY IMPROVEMENTS to incorporate:\n"
-            for i in improvements:
-                prompt += f"- {i}\n"
-                
-        prompt += "\nPlease generate an image that faithfully executes the Original Idea while strictly adhering to the mandatory improvements and avoiding the rejections. Ensure a highly professional, brand-aligned aesthetic."
+        rejections_str = "\n".join(f"- {r}" for r in rejections) if rejections else "None"
+        improvements_str = "\n".join(f"- {i}" for i in improvements) if improvements else "None"
 
-        result = await self.openai_client.images.edit(
-            model="gpt-image-2",
-            image=[("image.png", image_bytes)],
-            prompt=prompt
+        yield f"data: {json.dumps({'status': 'Consulting OpenRAG Agent for brand rules...'})}\n\n"
+        queries = [
+            "What are the rules for the brand trademark, logo, and typography?", 
+            "What is the primary brand color palette?", 
+            "What are the rules for brand photography and outdoor imagery?"
+        ]
+        brand_knowledge = await self._get_targeted_brand_knowledge(queries)
+
+        yield f"data: {json.dumps({'status': 'Synthesizing visual edit instructions...'})}\n\n"
+
+        synthesis_prompt = f"""<role_definition>
+You are an expert prompt engineer for an image editing AI. Your job is to translate complex brand guidelines, required improvements, and rejections into a single, concise paragraph of edit instructions.
+</role_definition>
+
+<original_image_description>
+{description}
+</original_image_description>
+
+<brand_knowledge>
+{brand_knowledge}
+</brand_knowledge>
+
+<improvements_to_apply>
+{improvements_str}
+</improvements_to_apply>
+
+<violations_to_remove>
+{rejections_str}
+</violations_to_remove>
+
+<instructions>
+Write exactly ONE single paragraph (max 3-4 sentences) that tells the image editor exactly what to remove and exactly what to add/change to fix the violations and apply the improvements.
+Be extremely literal, direct, and specific to the brand context provided. Do not use generic feedback. Do not write anything outside of this single paragraph. Do NOT include any citations or source names.
+</instructions>
+"""
+
+        synthesis_response = await self.openai_client.chat.completions.create(
+            model=settings.openai_chat_model,
+            messages=[{"role": "user", "content": synthesis_prompt}],
+            temperature=0.0
         )
         
+        final_edit_prompt = synthesis_response.choices[0].message.content.strip()
+
+        yield f"data: {json.dumps({'status': 'Generating surgically improved draft...'})}\n\n"
+
+        if settings.debug:
+            print("--- DEBUG: SYNTHESIZED IMAGE EDIT PROMPT ---")
+            print(final_edit_prompt)
+            print("--------------------------------------------")
+            start_time = time.time()
+
+        result = await self.openai_client.images.edit(
+            model=settings.openai_image_model,
+            image=[("image.png", image_bytes)],
+            prompt=final_edit_prompt
+        )
+        
+        if settings.debug:
+            elapsed = time.time() - start_time
+            print(f"--- DEBUG: IMAGE EDIT API CALL TOOK {elapsed:.2f} seconds ---")
+            
         new_image_base64 = result.data[0].b64_json
 
-        return {
-            "image_base64": f"data:image/png;base64,{new_image_base64}"
-        }
+        yield f"data: {json.dumps({'status': 'Complete', 'result': {'image_base64': f'data:image/png;base64,{new_image_base64}'}})}\n\n"
 
 _validator_service_instance = None
 

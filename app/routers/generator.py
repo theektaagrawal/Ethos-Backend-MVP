@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from app.services.generator_service import GeneratorService, get_generator_service
 
@@ -17,7 +18,6 @@ async def generate_image(
     if not request.prompt or not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
     try:
-        result = await service.generate_image(request.prompt.strip())
-        return result
+        return StreamingResponse(service.generate_image(request.prompt.strip()), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

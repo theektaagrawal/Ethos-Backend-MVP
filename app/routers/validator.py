@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Form, File, UploadFile, HTTPException
+from fastapi.responses import StreamingResponse
 from app.services.validator_service import ValidatorService, get_validator_service
 from app.models.validator import DraftApplyRequest
 import base64
@@ -15,8 +16,7 @@ async def audit_draft(
         contents = await image.read()
         image_base64 = base64.b64encode(contents).decode('utf-8')
         
-        result = await service.audit_image_draft(image_base64, description)
-        return result
+        return StreamingResponse(service.audit_image_draft(image_base64, description), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -26,12 +26,11 @@ async def apply_improvements(
     service: ValidatorService = Depends(get_validator_service)
 ):
     try:
-        result = await service.apply_image_improvements(
+        return StreamingResponse(service.apply_image_improvements(
             image_base64=request.image_base64,
             description=request.description,
             improvements=request.improvements,
             rejections=request.rejections
-        )
-        return result
+        ), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
