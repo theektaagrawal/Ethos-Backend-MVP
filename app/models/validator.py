@@ -10,6 +10,7 @@ class DraftApplyRequest(BaseModel):
     description: str
     improvements: List[str]
     rejections: List[str]
+    brand_name: Optional[str] = None
 
 class DraftApplyResponse(BaseModel):
     image_base64: str

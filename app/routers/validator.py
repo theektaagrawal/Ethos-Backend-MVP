@@ -10,13 +10,14 @@ router = APIRouter(prefix="/api/validator", tags=["validator"])
 async def audit_draft(
     description: str = Form(""),
     image: UploadFile = File(...),
+    brand_name: str = Form("McKINLEY"),
     service: ValidatorService = Depends(get_validator_service)
 ):
     try:
         contents = await image.read()
         image_base64 = base64.b64encode(contents).decode('utf-8')
         
-        return StreamingResponse(service.audit_image_draft(image_base64, description), media_type="text/event-stream")
+        return StreamingResponse(service.audit_image_draft(image_base64, description, brand_name), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -30,7 +31,8 @@ async def apply_improvements(
             image_base64=request.image_base64,
             description=request.description,
             improvements=request.improvements,
-            rejections=request.rejections
+            rejections=request.rejections,
+            brand_name=request.brand_name or "McKINLEY"
         ), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

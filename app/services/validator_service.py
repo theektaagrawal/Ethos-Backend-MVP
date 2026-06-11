@@ -3,11 +3,24 @@ import json
 import base64
 import asyncio
 import time
+import re
 from openai import AsyncOpenAI
 from app.services.openrag_client import get_openrag_client
 from app.routers.knowledge import BRAND_PRIMITIVES
 
 from app.config import settings
+
+def replace_mckinley_brand(content, brand_name: str):
+    if not brand_name:
+        return content
+    if isinstance(content, str):
+        return re.sub(r'mckinley', brand_name, content, flags=re.IGNORECASE)
+    elif isinstance(content, list):
+        return [replace_mckinley_brand(item, brand_name) for item in content]
+    elif isinstance(content, dict):
+        return {k: replace_mckinley_brand(v, brand_name) for k, v in content.items()}
+    return content
+
 
 class ValidatorService:
     def __init__(self):
@@ -111,10 +124,13 @@ Example Output:
 
         return "\n".join(context_parts)
 
-    async def audit_image_draft(self, image_base64: str, description: str):
+    async def audit_image_draft(self, image_base64: str, description: str, brand_name: str = "McKINLEY"):
         # Remove data:image/...;base64, prefix if present
         if "," in image_base64:
             image_base64 = image_base64.split(",")[1]
+
+        # Clean description
+        description = replace_mckinley_brand(description, brand_name)
 
         yield f"data: {json.dumps({'status': 'Analyzing visual elements...'})}\n\n"
         # Step 1: Analyze image to generate targeted queries
@@ -122,6 +138,8 @@ Example Output:
         
         yield f"data: {json.dumps({'status': 'Consulting Ethos Agent for brand rules...'})}\n\n"
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
+        # Clean brand_knowledge retrieved from database
+        brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
         
         yield f"data: {json.dumps({'status': 'Auditing against brand guidelines...'})}\n\n"
         
@@ -149,9 +167,20 @@ You are a strict brand guardian and creative director. Your sole job is to audit
 </draft_description>
 
 <instructions>
-Analyze the visual content of the provided image and its description.
-1. Identify if it violates any specific refusals, voice guidelines, or aesthetic rules in the context.
-2. Formulate highly specific, literal visual instructions for how the image MUST be edited to fix these violations. Do not use generic creative-director feedback (like "Simplify the composition"); instead, dictate exactly what needs to change visually.
+Analyze the visual content of the provided image and its description. Perform a rigorous, element-by-element brand audit:
+1. **Inspect the Logo/Trademark Color and Styling**:
+   - Check the exact color of the logo in the image (e.g., is it red, green, blue, white, black?).
+   - Cross-reference this color with the approved color versions in <brand_knowledge_context> (e.g., white, black, blue).
+   - If the logo color violates the guidelines (such as using a red logo when only white, black, or blue are allowed), flag it as a rejection and add an improvement to change it to an approved color.
+2. **Inspect Typography and Text overlays**:
+   - Check the fonts, capitalization, textures (e.g., distressed, clean), and placement.
+   - Verify against typographic rules in the context.
+3. **Inspect Layout, Sizing, and Safe Area**:
+   - Check the size and position of the logo, promotional badges, and other graphical overlays.
+4. **Identify Violations & Formulate Improvements**:
+   - Identify specific elements that violate any refusals, voice rules, color rules, or layout guidelines in the context.
+   - Formulate highly specific, literal visual instructions for how the image MUST be edited to fix these violations.
+   - Do NOT use generic creative-director feedback (like "Simplify the composition" or "Adjust color grade to be more natural"). Instead, dictate exactly what needs to change visually and literally (e.g., "Change the red logo in the top-left corner to white", "Remove the red '2025' arrival badge from the top-right", "Remove the distressed/grunge effect from the text").
 </instructions>
 
 <structured_output_contract>
@@ -249,17 +278,25 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             "Brand Critic": feedback_data.get("brand_critic", "Too generic. Hopefully the improvements will give it some actual character.")
         }
 
+        # Recursively replace any leaked "McKINLEY" text with custom brand name
+        audit_data = replace_mckinley_brand(audit_data, brand_name)
+
         if settings.debug:
             print(f"--- DEBUG: FULL AUDIT RESULT: {json.dumps(audit_data, indent=2)} ---")
 
         yield f"data: {json.dumps({'status': 'Complete', 'result': audit_data})}\n\n"
 
-    async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list):
+    async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list, brand_name: str = "McKINLEY"):
         if "," in image_base64:
             image_base64 = image_base64.split(",")[1]
             
         image_bytes = base64.b64decode(image_base64)
         
+        # Clean input text variables
+        description = replace_mckinley_brand(description, brand_name)
+        improvements = replace_mckinley_brand(improvements, brand_name)
+        rejections = replace_mckinley_brand(rejections, brand_name)
+
         rejections_str = "\n".join(f"- {r}" for r in rejections) if rejections else "None"
         improvements_str = "\n".join(f"- {i}" for i in improvements) if improvements else "None"
 
@@ -270,6 +307,8 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             "What are the rules for brand photography and outdoor imagery?"
         ]
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
+        # Clean brand_knowledge retrieved from database
+        brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
 
         yield f"data: {json.dumps({'status': 'Synthesizing visual edit instructions...'})}\n\n"
 
@@ -295,7 +334,10 @@ You are an expert prompt engineer for an image editing AI. Your job is to transl
 
 <instructions>
 Write exactly ONE single paragraph (max 3-4 sentences) that tells the image editor exactly what to remove and exactly what to add/change to fix the violations and apply the improvements.
-Be extremely literal, direct, and specific to the brand context provided. Do not use generic feedback. Do not write anything outside of this single paragraph. Do NOT include any citations or source names.
+- Translate abstract guidelines into concrete, specific, and direct instructions for the image editor.
+- Absolutely avoid high-level or generic design jargon (e.g., "intimate photography", "modest contrast", "improve visual hierarchy").
+- Instead, specify exact color, text, graphics, and placement edits (e.g., "Change the red logo in the top-left corner to a clean solid white logo", "Remove the red badge and any promotional text overlay in the top right", "Remove all grunge/distressed textures from the white headline text so the characters are clean and solid").
+- Do not write anything outside of this single paragraph. Do NOT include any citations or source names.
 </instructions>
 """
 
@@ -306,6 +348,8 @@ Be extremely literal, direct, and specific to the brand context provided. Do not
         )
         
         final_edit_prompt = synthesis_response.choices[0].message.content.strip()
+        # Ensure the final edit instruction to DALL-E uses the custom brand name
+        final_edit_prompt = replace_mckinley_brand(final_edit_prompt, brand_name)
 
         yield f"data: {json.dumps({'status': 'Generating surgically improved draft...'})}\n\n"
 
