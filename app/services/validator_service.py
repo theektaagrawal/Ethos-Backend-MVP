@@ -304,7 +304,10 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
         queries = [
             "What are the rules for the brand trademark, logo, and typography?", 
             "What is the primary brand color palette?", 
-            "What are the rules for brand photography and outdoor imagery?"
+            "What are the rules for brand photography and outdoor imagery?",
+            "What is the brand's aesthetic philosophy, visual style, and taste?",
+            "What is the brand's heritage, origin, and core values?",
+            "What are the brand refusals and constraints?"
         ]
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
         # Clean brand_knowledge retrieved from database
@@ -333,11 +336,11 @@ You are an expert prompt engineer for an image editing AI. Your job is to transl
 </violations_to_remove>
 
 <instructions>
-Write exactly ONE single paragraph (max 3-4 sentences) that tells the image editor exactly what to remove and exactly what to add/change to fix the violations and apply the improvements.
-- Translate abstract guidelines into concrete, specific, and direct instructions for the image editor.
-- Absolutely avoid high-level or generic design jargon (e.g., "intimate photography", "modest contrast", "improve visual hierarchy").
-- Instead, specify exact color, text, graphics, and placement edits (e.g., "Change the red logo in the top-left corner to a clean solid white logo", "Remove the red badge and any promotional text overlay in the top right", "Remove all grunge/distressed textures from the white headline text so the characters are clean and solid").
-- Do not write anything outside of this single paragraph. Do NOT include any citations or source names.
+Write a cohesive prompt for the image editor (maximum 800 characters) that tells it exactly what to change to fix the violations, while heavily injecting the brand's unique aesthetics, lighting, mood, and visual style.
+- Include concrete, specific, and direct instructions for the mechanical edits (e.g., "Change the red logo in the top-left corner to a clean solid white logo").
+- Explicitly integrate the brand's required aesthetics, mood, and photography style from the <brand_knowledge> to ensure the final image maintains the premium brand nuance.
+- Do NOT include any citations or source names.
+- Do not write anything outside of the final prompt itself.
 </instructions>
 """
 
