@@ -332,50 +332,12 @@ async def get_3d_graph(client: OpenRAGClient = Depends(get_openrag_client)):
                         "source": "LightRAG_Core",
                         "target": n["id"],
                         "label": "extracted entity",
-                        "strength": 2
                     })
     except Exception as e:
         logger.warning(f"LightRAG fetch failed or not ready yet: {e}")
 
-    # 2. Fallback dynamic graph from OpenRAG indexed documents if LightRAG graph is building/empty
-    if not nodes:
-        docs = await discover_openrag_documents(client)
-        nodes.append({
-            "id": "core",
-            "label": "OpenRAG Knowledge Base",
-            "type": "brand_core",
-            "sub": "Central Graph Engine · LightRAG Active",
-            "weight": 10
-        })
-
-        types = ["primitive", "heritage", "lived_position", "taste", "voice", "product", "technology"]
-        for i, doc in enumerate(docs[:50]):
-            doc_id = f"doc_{i}"
-            filename = doc.get("filename", f"Document {i+1}")
-            node_type = types[i % len(types)]
-            score = doc.get("score") or 0.5
-            nodes.append({
-                "id": doc_id,
-                "label": filename[:32],
-                "type": node_type,
-                "sub": f"Score: {score:.2f} · Indexed via Docling",
-                "weight": max(2, min(8, int(score * 10)))
-            })
-            edges.append({
-                "source": "core",
-                "target": doc_id,
-                "label": "indexed document",
-                "strength": 3
-            })
-            if i > 0 and i % 3 == 0:
-                edges.append({
-                    "source": f"doc_{i-1}",
-                    "target": doc_id,
-                    "label": "semantic overlap",
-                    "strength": 2
-                })
-
     return {
+        "meta": {"brand": "McKINLEY", "tagline": "Escape to Nature", "founded": "1984", "version": "2025"},
         "nodes": nodes,
         "edges": edges,
         "generated_at": datetime.utcnow().isoformat(),
