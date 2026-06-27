@@ -345,6 +345,20 @@ async def get_3d_graph(client: OpenRAGClient = Depends(get_openrag_client)):
                         "target": n["id"],
                         "label": "extracted entity",
                     })
+            if nodes and edges:
+                deg_map = {}
+                for e in edges:
+                    src = e.get("source")
+                    tgt = e.get("target")
+                    if src: deg_map[src] = deg_map.get(src, 0) + 1
+                    if tgt: deg_map[tgt] = deg_map.get(tgt, 0) + 1
+                max_deg = max(deg_map.values()) if deg_map else 1
+                nodes.sort(key=lambda x: deg_map.get(x["id"], 0), reverse=True)
+                for idx, n in enumerate(nodes):
+                    deg = deg_map.get(n["id"], 1)
+                    n["weight"] = round(4 + (deg / max_deg) * 6, 1)
+                    if idx == 0 or (n["type"] in ["organization", "brand"] and deg >= max_deg * 0.5):
+                        n["type"] = "brand_core"
     except Exception as e:
         logger.warning(f"LightRAG fetch failed or not ready yet: {e}")
 
