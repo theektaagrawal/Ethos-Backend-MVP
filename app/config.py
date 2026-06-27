@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     openrag_url: str = "http://localhost:8000"
+    lightrag_url: str = "http://localhost:9621"
     openrag_api_key: str = ""
     folio_api_key: str = "dev-api-key"
     openai_api_key: str = ""

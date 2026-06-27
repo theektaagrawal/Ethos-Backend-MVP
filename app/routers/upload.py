@@ -222,6 +222,18 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             # Fallback to langflow upload if needed
             response = await client.client.post("/langflow/files/upload", files=files)
             
+        # Also upload the document to LightRAG so it gets parsed by Docling and indexed into the 3D Graph
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=30.0) as lr_client:
+                await lr_client.post(
+                    f"{settings.lightrag_url.rstrip('/')}/documents/file",
+                    files={"file": (safe_filename, content, actual_content_type)}
+                )
+        except Exception as lr_err:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to forward upload to LightRAG: {lr_err}")
+            
         import datetime
         from app.services.document_store import save_document
         
