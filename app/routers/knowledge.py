@@ -97,7 +97,19 @@ async def discover_openrag_documents(client: OpenRAGClient):
 @router.get("/")
 async def list_documents(client: OpenRAGClient = Depends(get_openrag_client)):
     try:
-        return {"documents": await discover_openrag_documents(client)}
+        from app.services.document_store import load_documents
+        local_docs = load_documents()
+        openrag_docs = await discover_openrag_documents(client)
+        
+        doc_map = {d.get("filename"): d for d in local_docs if d.get("filename")}
+        for od in openrag_docs:
+            fn = od.get("filename")
+            if fn:
+                if fn in doc_map:
+                    doc_map[fn].update(od)
+                else:
+                    doc_map[fn] = od
+        return {"documents": list(doc_map.values())}
     except Exception:
         return {"documents": []}
 
@@ -378,6 +390,20 @@ async def delete_document_endpoint(
                 status_code=response.status_code,
                 detail=f"OpenRAG error: {response.text}",
             )
+
+        # Also delete the document from LightRAG index
+        try:
+            import httpx as _httpx
+            from app.config import settings
+            async with _httpx.AsyncClient(timeout=10.0) as lr_client:
+                await lr_client.request(
+                    "DELETE",
+                    f"{settings.lightrag_url.rstrip('/')}/documents/delete_document",
+                    json={"doc_ids": [doc_id], "filenames": [target_filename]}
+                )
+        except Exception as lr_err:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to forward delete to LightRAG: {lr_err}")
 
         delete_document(doc_id)
         delete_document_by_filename(target_filename)
