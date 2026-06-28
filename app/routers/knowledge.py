@@ -390,6 +390,8 @@ async def delete_document_endpoint(
             or (doc or {}).get("name")
             or (doc_id.removeprefix("openrag_") if doc_id.startswith("openrag_") else doc_id)
         )
+        if not doc and target_filename:
+            doc = next((d for d in docs if d.get("filename") == target_filename or d.get("name") == target_filename), None)
 
         if not target_filename:
             raise HTTPException(status_code=400, detail="Document filename is required")
@@ -410,10 +412,55 @@ async def delete_document_endpoint(
             import httpx as _httpx
             from app.config import settings
             async with _httpx.AsyncClient(timeout=10.0) as lr_client:
+                # 1. Use stored lightrag_id if available, otherwise query LightRAG GET /documents
+                lr_doc_id = (doc or {}).get("lightrag_id")
+                if not lr_doc_id:
+                    try:
+                        docs_res = await lr_client.get(f"{settings.lightrag_url.rstrip('/')}/documents")
+                        if docs_res.status_code == 200:
+                            docs_data = docs_res.json()
+                            items = []
+                            if isinstance(docs_data, list):
+                                items = docs_data
+                            elif isinstance(docs_data, dict):
+                                for key in ["statuses", "documents", "data", "results"]:
+                                    if key in docs_data and isinstance(docs_data[key], (list, dict)):
+                                        val = docs_data[key]
+                                        if isinstance(val, list):
+                                            items.extend(val)
+                                        elif isinstance(val, dict):
+                                            for k, v in val.items():
+                                                if isinstance(v, dict):
+                                                    items.append({"id": k, **v})
+                                if not items:
+                                    for k, v in docs_data.items():
+                                        if isinstance(v, dict):
+                                            items.append({"id": k, **v})
+                                        elif isinstance(v, str):
+                                            items.append({"id": k, "filename": v})
+
+                            target_clean = target_filename.replace("\\", "/").split("/")[-1]
+                            for item in items:
+                                if not isinstance(item, dict):
+                                    continue
+                                cid = item.get("id") or item.get("doc_id") or item.get("document_id")
+                                if not cid:
+                                    continue
+                                cfn = str(item.get("file_path") or item.get("filename") or item.get("doc_name") or item.get("name") or item.get("path") or "").replace("\\", "/").split("/")[-1]
+                                if cfn == target_clean or (target_clean and target_clean in cfn) or (cfn and cfn in target_clean) or str(cid) == doc_id:
+                                    lr_doc_id = str(cid)
+                                    break
+                    except Exception as get_err:
+                        import logging
+                        logging.getLogger(__name__).warning(f"Failed to query LightRAG documents list: {get_err}")
+
+                final_lr_id = lr_doc_id or doc_id
+
+                # 2. Call delete_document endpoint passing correct doc_id and delete_file: true
                 await lr_client.request(
                     "DELETE",
                     f"{settings.lightrag_url.rstrip('/')}/documents/delete_document",
-                    json={"doc_ids": [doc_id], "filenames": [target_filename]}
+                    json={"doc_ids": [final_lr_id], "delete_file": True}
                 )
         except Exception as lr_err:
             import logging

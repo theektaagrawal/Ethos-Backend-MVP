@@ -223,13 +223,32 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             response = await client.client.post("/langflow/files/upload", files=files)
             
         # Also upload the document to LightRAG so it gets parsed by Docling and indexed into the 3D Graph
+        lr_doc_id = None
         try:
             import httpx as _httpx
             async with _httpx.AsyncClient(timeout=30.0) as lr_client:
-                await lr_client.post(
+                lr_res = await lr_client.post(
                     f"{settings.lightrag_url.rstrip('/')}/documents/file",
                     files={"file": (safe_filename, content, actual_content_type)}
                 )
+                if lr_res.status_code == 200:
+                    try:
+                        lr_data = lr_res.json()
+                        if isinstance(lr_data, dict):
+                            lr_doc_id = lr_data.get("doc_id") or lr_data.get("id")
+                            if not lr_doc_id and "doc_ids" in lr_data and isinstance(lr_data["doc_ids"], list) and lr_data["doc_ids"]:
+                                lr_doc_id = str(lr_data["doc_ids"][0])
+                            if not lr_doc_id and "statuses" in lr_data and isinstance(lr_data["statuses"], dict):
+                                keys = list(lr_data["statuses"].keys())
+                                if keys:
+                                    lr_doc_id = str(keys[0])
+                            if not lr_doc_id:
+                                for k, v in lr_data.items():
+                                    if isinstance(v, dict) and str(k).startswith("doc-"):
+                                        lr_doc_id = str(k)
+                                        break
+                    except Exception:
+                        pass
         except Exception as lr_err:
             import logging
             logging.getLogger(__name__).warning(f"Failed to forward upload to LightRAG: {lr_err}")
@@ -247,6 +266,7 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             
         doc_data = {
             "id": doc_id,
+            "lightrag_id": lr_doc_id,
             "filename": actual_filename,
             "status": "completed",
             "created_at": datetime.datetime.now().isoformat(),
