@@ -136,7 +136,7 @@ Example Output:
         # Step 1: Analyze image to generate targeted queries
         queries = await self._analyze_image_for_queries(image_base64, description)
         
-        yield f"data: {json.dumps({'status': 'Consulting Ethos Agent for brand rules...'})}\n\n"
+        yield f"data: {json.dumps({'status': 'Consulting Loci Agent for brand rules...'})}\n\n"
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
         # Clean brand_knowledge retrieved from database
         brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
@@ -300,7 +300,7 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
         rejections_str = "\n".join(f"- {r}" for r in rejections) if rejections else "None"
         improvements_str = "\n".join(f"- {i}" for i in improvements) if improvements else "None"
 
-        yield f"data: {json.dumps({'status': 'Consulting Ethos Agent for brand rules...'})}\n\n"
+        yield f"data: {json.dumps({'status': 'Consulting Loci Agent for brand rules...'})}\n\n"
         queries = [
             "What are the rules for the brand trademark, logo, and typography?", 
             "What is the primary brand color palette?", 
