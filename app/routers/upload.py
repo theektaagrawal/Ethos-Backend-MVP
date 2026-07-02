@@ -228,10 +228,10 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             import httpx as _httpx
             async with _httpx.AsyncClient(timeout=30.0) as lr_client:
                 lr_res = await lr_client.post(
-                    f"{settings.lightrag_url.rstrip('/')}/documents/file",
+                    f"{settings.lightrag_url.rstrip('/')}/documents/upload",
                     files={"file": (safe_filename, content, actual_content_type)}
                 )
-                if lr_res.status_code == 200:
+                if 200 <= lr_res.status_code < 300:
                     try:
                         lr_data = lr_res.json()
                         if isinstance(lr_data, dict):

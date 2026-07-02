@@ -412,12 +412,15 @@ async def delete_document_endpoint(
             import httpx as _httpx
             from app.config import settings
             async with _httpx.AsyncClient(timeout=10.0) as lr_client:
-                # 1. Use stored lightrag_id if available, otherwise query LightRAG GET /documents
+                # 1. Use stored lightrag_id if available, otherwise query LightRAG POST /documents/paginated
                 lr_doc_id = (doc or {}).get("lightrag_id")
                 if not lr_doc_id:
                     try:
-                        docs_res = await lr_client.get(f"{settings.lightrag_url.rstrip('/')}/documents")
-                        if docs_res.status_code == 200:
+                        docs_res = await lr_client.post(
+                            f"{settings.lightrag_url.rstrip('/')}/documents/paginated",
+                            json={"page": 1, "page_size": 100}
+                        )
+                        if 200 <= docs_res.status_code < 300:
                             docs_data = docs_res.json()
                             items = []
                             if isinstance(docs_data, list):
