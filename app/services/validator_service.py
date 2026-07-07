@@ -48,11 +48,11 @@ Analyze the visual details of the image. Identify key elements such as:
 </instructions>
 
 <structured_output_contract>
-Output ONLY a JSON object with a single key "queries" containing a list of 3-5 conversational questions we can ask a brand agent to look up the rules regarding these specific elements. Do not wrap in markdown or write explanation.
+Output ONLY a JSON object with a single key "queries" containing a list of 3-5 keyword-rich search phrases optimized for semantic vector search (NOT natural language questions). Each phrase should be 4-8 words combining the visual element observed and the rule domain it falls under.
 
 Example Output:
 {{
-  "queries": ["What are the rules regarding celebrity endorsements?", "What lighting style should be used for product photography?", "Are there specific rules for ribbon wrapping on packaging?", "Is it allowed to use exclamation marks in copy?"]
+  "queries": ["celebrity endorsement rules prohibitions refusals", "product photography lighting style guidelines", "ribbon packaging wrapping visual constraints", "exclamation marks punctuation copywriting voice rules"]
 }}
 </structured_output_contract>
 """
@@ -90,37 +90,46 @@ Example Output:
         return data.get("queries", [])
 
     async def _get_targeted_brand_knowledge(self, queries: list[str]) -> str:
-        """Gathers snippets from OpenRAG based on dynamic image analysis queries."""
-        context_parts = []
-        
+        """Gathers raw document chunks from OpenRAG based on image analysis queries."""
         async def search_query(query):
             try:
                 response = await self.openrag_client.client.post(
-                    "/v1/chat",
-                    json={"message": query},
+                    "/v1/search",
+                    json={"query": query, "limit": 5, "score_threshold": 0.3},
                 )
                 if response.status_code == 200:
-                    chat_response = response.json().get("response", "").strip()
-                    if chat_response:
-                        return query, [chat_response]
+                    results = response.json().get("results", [])
+                    snippets = []
+                    for r in results:
+                        text = r.get("text", "").strip()
+                        filename = r.get("filename", "")
+                        if text:
+                            snippets.append((text, filename))
+                    return query, snippets
             except Exception:
                 pass
             return query, []
 
         if settings.debug:
             start_time = time.time()
-            
+
         query_results = await asyncio.gather(*(search_query(q) for q in queries))
-        
+
         if settings.debug:
             elapsed = time.time() - start_time
             print(f"--- DEBUG: OPENRAG QUERIES TOOK {elapsed:.2f} seconds ---")
-        
+
+        seen: set[str] = set()
+        context_parts: list[str] = []
         for query, snippets in query_results:
             if snippets:
                 context_parts.append(f"--- Context for: {query} ---")
-                for snippet in snippets:
-                    context_parts.append(snippet)
+                for text, filename in snippets:
+                    key = text[:120]
+                    if key not in seen:
+                        seen.add(key)
+                        source = f"\n[Source: {filename}]" if filename else ""
+                        context_parts.append(f"{text[:600]}{source}")
 
         return "\n".join(context_parts)
 
@@ -137,10 +146,49 @@ Example Output:
         queries = await self._analyze_image_for_queries(image_base64, description)
         
         yield f"data: {json.dumps({'status': 'Consulting Loci Agent for brand rules...'})}\n\n"
-        brand_knowledge = await self._get_targeted_brand_knowledge(queries)
+        # Augment dynamic queries with systematic primitive coverage so the audit
+        # always has broad brand context even when visual analysis misses a dimension.
+        primitive_queries = [
+            "brand refusals prohibitions never do constraints",
+            "brand color palette approved colors logo usage",
+            "brand typography fonts capitalization text rules",
+            "brand aesthetic philosophy visual style photography",
+        ]
+        all_queries = queries + [q for q in primitive_queries if q not in queries]
+
+        # Fetch two types of context in parallel:
+        # 1. Raw chunks via /v1/search → real source citations
+        # 2. A single /v1/chat call → LightRAG relational/thematic synthesis (no citation required)
+        async def fetch_relational_context():
+            try:
+                response = await self.openrag_client.client.post(
+                    "/v1/chat",
+                    json={"message": "Summarize the brand's core aesthetic identity, key visual prohibitions, and defining design principles across all brand primitives."},
+                )
+                if response.status_code == 200:
+                    return response.json().get("response", "").strip()
+            except Exception:
+                pass
+            return ""
+
+        factual_chunks_task = self._get_targeted_brand_knowledge(all_queries)
+        relational_ctx, factual_chunks = await asyncio.gather(
+            fetch_relational_context(), factual_chunks_task
+        )
+
+        sections = []
+        if relational_ctx:
+            sections.append(f"=== Brand Identity Summary (thematic, no citation required) ===\n{relational_ctx}")
+        if factual_chunks:
+            sections.append(f"=== Specific Brand Rules (cite [Source:] from these) ===\n{factual_chunks}")
+        brand_knowledge = "\n\n".join(sections)
+
         # Clean brand_knowledge retrieved from database
         brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
-        
+
+        if not brand_knowledge.strip():
+            yield f"data: {json.dumps({'status': 'Warning: No brand knowledge retrieved. Check that OpenRAG has indexed documents.'})}\n\n"
+
         yield f"data: {json.dumps({'status': 'Auditing against brand guidelines...'})}\n\n"
         
         prompt = f"""<role_definition>
@@ -193,8 +241,8 @@ Do not add any prose or markdown formatting outside of the JSON object.
 
 Example Output:
 {{
-  "improvements": ["Remove the exclamation marks from the text.", "Replace the complex packaging with a plain matte black box."],
-  "rejections": ["The image features a celebrity, which violates the 'Celebrity Dressing' refusal rule.", "The packaging looks too complex, conflicting with our restrained, durable packaging standards."]
+  "improvements": ["Remove the exclamation marks from the text overlay. [Source: BrandVoice.pdf]", "Replace the complex packaging with a plain matte black box. [Source: PackagingStandards.pdf]"],
+  "rejections": ["The image features a celebrity, which violates the 'Celebrity Dressing' refusal rule. [Source: Refusals.pdf]", "The packaging looks too complex, conflicting with our restrained, durable packaging standards. [Source: PackagingStandards.pdf]"]
 }}
 """
         if settings.debug:
@@ -262,7 +310,7 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
 
         feedback_response = await self.openai_client.chat.completions.create(
             model=settings.openai_chat_model,
-            temperature=0.0,
+            temperature=0.7,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": feedback_prompt}]
         )
@@ -301,14 +349,20 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
         improvements_str = "\n".join(f"- {i}" for i in improvements) if improvements else "None"
 
         yield f"data: {json.dumps({'status': 'Consulting Loci Agent for brand rules...'})}\n\n"
-        queries = [
-            "What are the rules for the brand trademark, logo, and typography?", 
-            "What is the primary brand color palette?", 
-            "What are the rules for brand photography and outdoor imagery?",
-            "What is the brand's aesthetic philosophy, visual style, and taste?",
-            "What is the brand's heritage, origin, and core values?",
-            "What are the brand refusals and constraints?"
+        # Build queries from actual violations and improvements found in the audit
+        # so the synthesis step retrieves relevant rules, not generic buckets.
+        violation_queries = []
+        for item in (rejections + improvements)[:6]:
+            # Strip source citations from the text before using as a query
+            clean = re.sub(r'\[Source:[^\]]+\]', '', item).strip()
+            if clean:
+                violation_queries.append(clean[:200])
+        fallback_queries = [
+            "brand trademark logo color typography rules",
+            "brand aesthetic philosophy visual style photography",
+            "brand refusals prohibitions constraints",
         ]
+        queries = violation_queries if violation_queries else fallback_queries
         brand_knowledge = await self._get_targeted_brand_knowledge(queries)
         # Clean brand_knowledge retrieved from database
         brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
