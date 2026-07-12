@@ -17,7 +17,11 @@ def _vlog(title: str, content=""):
 
 
 def replace_mckinley_brand(content, brand_name: str):
-    if not brand_name:
+    # When the brand IS McKINLEY there is nothing to substitute — and running the
+    # case-insensitive replace anyway rewrites deliberately wrong-case occurrences
+    # (e.g. a finding that flags 'MCKINLEY' capitalization) into the correct form,
+    # turning that fix into a no-op before it reaches the image editor.
+    if not brand_name or brand_name.strip().lower() == "mckinley":
         return content
     if isinstance(content, str):
         # Lambda replacement so brand names containing regex escapes (\, $1...) stay literal.
@@ -127,7 +131,22 @@ def build_edit_prompt(fixes: list[str], preserve: list[str]) -> str:
             "Keep these elements exactly as they are, completely unchanged: "
             + "; ".join(preserve) + "."
         )
-    lines.extend([
+    # Letter-by-letter spellings for the short quoted strings in the edits. Image
+    # models corrupt exactly these (rendered "NO LIMITS" as "NO LIMIITS"); the
+    # OpenAI prompting guide's remedy is spelling tricky words out explicitly.
+    spelled: list[str] = []
+    seen_quotes: set[str] = set()
+    for fix in fixes:
+        for q in re.findall(r"[\"']([^\"']{2,24})[\"']", fix):
+            if q not in seen_quotes and any(c.isalnum() for c in q):
+                seen_quotes.add(q)
+                spelled.append(f'"{q}" = ' + ", ".join("space" if c == " " else c for c in q))
+    spell_lines = (
+        ["Exact spellings of the text above, letter by letter: " + " | ".join(spelled[:8]) + "."]
+        if spelled else []
+    )
+
+    lines.extend(spell_lines + [
         "If people appear, keep each person's face, body shape, pose, hair, and expression exactly unchanged unless a numbered edit targets them.",
         "Render every quoted string verbatim, character for character — no extra characters, no omissions, no respelling.",
         "When an edit changes text or its styling, keep that text block's position, size, and alignment unchanged unless the edit states otherwise.",
@@ -150,16 +169,23 @@ AUDIT_RULE_QUERIES = [
     "brand refusals prohibitions never do constraints",
     "layout safe area overlay badge placement rules",
     "brand voice tone copywriting language rules",
+    # The brand's essence lives in language rules, not just visual mechanics —
+    # tagline usage, tone of voice, and is/is-not positioning statements are what
+    # make copy like a conquest-themed headline off-brand even in the right font.
+    "brand tagline slogan claim usage rules",
+    "brand positioning personality what we are what we are not messaging",
 ]
 
 # One fixed question for the agentic OpenRAG flow (which routes between chunk search and
 # the LightRAG relational graph). Fixed for the same repeatability reason, and phrased to
 # elicit rule statements with citations so its content is groundable.
 RELATIONAL_CONTEXT_QUERY = (
-    "List the brand's explicit visual identity rules: approved logo colors and usage, "
-    "approved color palette, typography rules, photography and imagery rules, layout and "
-    "overlay rules, and hard refusals (things the brand must never do). Quote each rule "
-    "and cite its source document."
+    "List the brand's explicit identity rules: approved logo colors and usage, approved "
+    "color palette, typography rules, photography and imagery rules, layout and overlay "
+    "rules, hard refusals (things the brand must never do), the brand tagline and the "
+    "rules for its use, the documented tone of voice, brand personality, and any "
+    "positioning or messaging statements describing what the brand is and is not. "
+    "Quote each rule and cite its source document."
 )
 
 
@@ -233,7 +259,7 @@ class ValidatorService:
                 json={"message": RELATIONAL_CONTEXT_QUERY},
             )
             if response.status_code == 200:
-                return response.json().get("response", "").strip()[:3500]
+                return _clip_at_sentence(response.json().get("response", "").strip(), 4000)
         except Exception:
             pass
         return ""
@@ -301,6 +327,7 @@ You are a brand compliance auditor. You inspect a draft marketing image against 
 <verifiability_rules>
 Only flag what you can actually SEE in the image. Never flag an element because a property cannot be positively confirmed from a rendered image.
 - Typeface identity is NOT verifiable from pixels: never flag text merely because you "cannot confirm" it is the documented typeface. Flag typography only on a VISIBLE deviation — wrong capitalization, or a decorative, script, serif, distressed, or hand-drawn treatment that clearly is not the brand's clean sans-serif.
+- The WORDS in the image are fully visible evidence. Reading the copy and judging its message against the documented tagline rules, tone of voice, and positioning statements is verifiable and required — off-brand language is as real a violation as an off-brand color.
 - Colors must be judged with perceptual tolerance: approved brand colors can look close to other colors in a photo (a very dark approved blue reads as near-black). If an element's color plausibly matches an approved value, it is compliant; flag color only on a clear mismatch (e.g. red where only blue, black, or white are approved).
 - Each violation must name the visible evidence ("the headline letterforms have a distressed grunge texture"), not an unverifiable assertion ("the text is not in the documented typeface system").
 </verifiability_rules>
@@ -319,6 +346,9 @@ Work in two passes.
 PASS 1 — INVENTORY. List every distinct visual element in the image: each logo/trademark, each text block (headline, supporting copy, price, spec/feature lists), each badge or overlay, the product(s), any people, and the scene/background. Give each a short spatial name (e.g. "top-left logo", "price block bottom-left", "headline").
 
 PASS 2 — AUDIT. Check each inventoried element against the explicit rules in <brand_knowledge_context>:
+- Audit every text element TWICE: once for its visual treatment (case, texture, color), and once for its LANGUAGE. Check the wording itself against the documented tagline rules, tone of voice, brand personality, and any "we are / we are not" positioning statements in the context. Copy whose message contradicts those rules — e.g. competitive, conquest, elitist, hype or extreme-performance language where the context documents conversational, accessible, straightforward, less-is-more messaging — violates the brand even when its styling is perfect. Do not preserve off-brand wording just because it is prominent.
+- When copy must change, the fix supplies the exact replacement wording in double quotes: use the documented tagline where its usage rules permit, or write copy that follows the documented voice. Never invent claims, slogans, or heritage facts that the context does not support.
+- A text element with both a language violation and a styling violation still gets ONE finding whose single fix addresses both (rewrite the words in the approved style).
 - An element receives AT MOST ONE finding, with exactly one verdict:
   - "restyle": the element stays but must change (color, typeface, wording, treatment). The fix must state the exact target using literal values from the context — the exact approved color name, the exact typeface, the exact replacement text in double quotes. When the target is a color, give a plain-language description alongside any code, because the image editor acts on descriptions, not hex values (e.g. 'the approved brand blue #002539 — a very dark navy, almost black').
   - "remove": the element is prohibited by a rule in the context and must be deleted entirely.
