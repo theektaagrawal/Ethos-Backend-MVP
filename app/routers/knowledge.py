@@ -3,6 +3,7 @@ from datetime import datetime
 import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from app.services.openrag_client import get_openrag_client, OpenRAGClient
 
 logger = logging.getLogger(__name__)
@@ -268,20 +269,41 @@ async def get_brand_graph(client: OpenRAGClient = Depends(get_openrag_client)):
         "generated_at": datetime.utcnow().isoformat(),
     }
 
+def _as_string_list(value):
+    """Normalise LightRAG source metadata without losing the original payload."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item]
+    return [str(value)] if value else []
+
+
 @router.get("/3d-graph")
-async def get_3d_graph(client: OpenRAGClient = Depends(get_openrag_client)):
+async def get_3d_graph(
+    label: str = Query("*", min_length=1),
+    max_depth: int = Query(3, ge=1, le=8),
+    max_nodes: int = Query(300, ge=1, le=1000),
+):
+    """Return a faithful, display-ready LightRAG subgraph.
+
+    The previous adapter replaced graph properties and invented hub edges when
+    LightRAG had no relationships.  This endpoint deliberately preserves the
+    source payload so the UI can distinguish extracted evidence from an empty
+    or truncated graph.
+    """
     import httpx
     from app.config import settings
 
     nodes = []
     edges = []
+    is_truncated = False
 
     # 1. Try fetching real graph structure from LightRAG /graphs endpoint (same as WebUI)
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
             res = await http.get(
                 f"{settings.lightrag_url.rstrip('/')}/graphs",
-                params={"label": "*", "max_depth": 3, "max_nodes": 1000}
+                params={"label": label, "max_depth": max_depth, "max_nodes": max_nodes}
             )
             if res.status_code == 200:
                 data = res.json()
@@ -300,8 +322,12 @@ async def get_3d_graph(client: OpenRAGClient = Depends(get_openrag_client)):
                                     "id": node_id,
                                     "label": label_str,
                                     "type": str(props.get("entity_type", "concept")).lower(),
-                                    "sub": str(props.get("description", "Extracted via LightRAG"))[:120],
-                                    "weight": float(props.get("weight", 4))
+                                    "sub": str(props.get("description", "Extracted via LightRAG"))[:500],
+                                    "weight": float(props.get("weight", 1) or 1),
+                                    "labels": labels if isinstance(labels, list) else [label_str],
+                                    "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
+                                    "file_path": props.get("file_path"),
+                                    "properties": props,
                                 })
 
                     for e in raw_edges:
@@ -314,59 +340,63 @@ async def get_3d_graph(client: OpenRAGClient = Depends(get_openrag_client)):
                                 edges.append({
                                     "source": src,
                                     "target": tgt,
-                                    "label": kw[:40] if kw else "relates to",
-                                    "strength": float(props.get("weight", 2))
+                                    "label": kw if kw else "relates to",
+                                    "strength": float(props.get("weight", 1) or 1),
+                                    "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
+                                    "properties": props,
                                 })
-
-            # Fallback to label list if /graphs returned empty
-            if not nodes:
-                lbl_res = await http.get(f"{settings.lightrag_url.rstrip('/')}/graph/label/list")
-                if lbl_res.status_code == 200:
-                    lbl_data = lbl_res.json()
-                    ent_list = lbl_data.get("entities", []) if isinstance(lbl_data, dict) else (lbl_data if isinstance(lbl_data, list) else [])
-                    for ent in ent_list:
-                        if isinstance(ent, str):
-                            nodes.append({"id": ent, "label": ent, "type": "concept", "sub": "Extracted Entity", "weight": 4})
-                        elif isinstance(ent, dict):
-                            nodes.append({"id": str(ent.get("id", ent.get("label", "node"))), "label": str(ent.get("label", "node")), "type": "concept", "sub": str(ent.get("description", ""))[:100], "weight": 4})
-
-            # If nodes exist but edges couldn't be fetched, link nodes to a central hub
-            if nodes and not edges:
-                nodes.insert(0, {
-                    "id": "LightRAG_Core",
-                    "label": "Knowledge Graph",
-                    "type": "brand_core",
-                    "sub": "Central Entity Hub",
-                    "weight": 10
-                })
-                for n in nodes[1:]:
-                    edges.append({
-                        "source": "LightRAG_Core",
-                        "target": n["id"],
-                        "label": "extracted entity",
-                    })
-            if nodes and edges:
-                deg_map = {}
-                for e in edges:
-                    src = e.get("source")
-                    tgt = e.get("target")
-                    if src: deg_map[src] = deg_map.get(src, 0) + 1
-                    if tgt: deg_map[tgt] = deg_map.get(tgt, 0) + 1
-                max_deg = max(deg_map.values()) if deg_map else 1
-                nodes.sort(key=lambda x: deg_map.get(x["id"], 0), reverse=True)
-                for idx, n in enumerate(nodes):
-                    deg = deg_map.get(n["id"], 1)
-                    n["weight"] = round(4 + (deg / max_deg) * 6, 1)
-                    if idx == 0 or (n["type"] in ["organization", "brand"] and deg >= max_deg * 0.5):
-                        n["type"] = "brand_core"
+                    is_truncated = bool(data.get("is_truncated", False))
+                else:
+                    is_truncated = False
+            else:
+                is_truncated = False
     except Exception as e:
         logger.warning(f"LightRAG fetch failed or not ready yet: {e}")
 
     return {
-        "meta": {"brand": "McKINLEY", "tagline": "Escape to Nature", "founded": "1984", "version": "2025"},
+        "meta": {"query_label": label, "max_depth": max_depth, "max_nodes": max_nodes},
         "nodes": nodes,
         "edges": edges,
+        "is_truncated": is_truncated,
         "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+class ScoreDiagnosticRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+@router.post("/search-diagnostics")
+async def search_diagnostics(
+    request: ScoreDiagnosticRequest,
+    client: OpenRAGClient = Depends(get_openrag_client),
+):
+    """Expose score distribution without pretending raw hybrid scores are similarity."""
+    response = await client.client.post(
+        "/v1/search",
+        json={"query": request.query, "limit": request.limit, "score_threshold": 0},
+    )
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail="OpenRAG search diagnostics request failed")
+    results = response.json().get("results", [])
+    scores = sorted(float(item["score"]) for item in results if isinstance(item.get("score"), (int, float)))
+    def percentile(fraction: float):
+        if not scores:
+            return None
+        return scores[min(len(scores) - 1, round((len(scores) - 1) * fraction))]
+    return {
+        "query": request.query,
+        "score_kind": "OpenSearch raw hybrid _score (not cosine similarity or a percentage)",
+        "result_count": len(results),
+        "distribution": {
+            "min": percentile(0), "median": percentile(0.5), "p90": percentile(0.9), "max": percentile(1),
+            "distinct_rounded_2dp": len({round(score, 2) for score in scores}),
+        },
+        "results": [
+            {"rank": index + 1, "filename": item.get("filename"), "page": item.get("page"), "raw_score": item.get("score"), "embedding_model": item.get("embedding_model")}
+            for index, item in enumerate(results)
+        ],
     }
 
 @router.delete("/{doc_id}")
@@ -406,6 +436,11 @@ async def delete_document_endpoint(
                 status_code=response.status_code,
                 detail=f"OpenRAG error: {response.text}",
             )
+
+        # Brand context is cached for generation; document deletion must take
+        # effect immediately rather than waiting for the TTL.
+        from app.services.generator_service import invalidate_brand_context_cache
+        invalidate_brand_context_cache()
 
         # Also delete the document from LightRAG index
         try:

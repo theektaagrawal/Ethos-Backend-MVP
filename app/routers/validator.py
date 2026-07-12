@@ -32,7 +32,8 @@ async def apply_improvements(
             description=request.description,
             improvements=request.improvements,
             rejections=request.rejections,
-            brand_name=request.brand_name or "McKINLEY"
+            brand_name=request.brand_name or "McKINLEY",
+            previous_response_id=request.previous_response_id
         ), media_type="text/event-stream")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

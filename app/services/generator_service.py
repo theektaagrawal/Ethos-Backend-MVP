@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import time
 from openai import AsyncOpenAI
 from app.services.openrag_client import get_openrag_client
 from app.config import settings
@@ -13,6 +14,14 @@ BRAND_CONTEXT_QUERIES = [
     "brand taste product design sensibility material preferences",
 ]
 
+_brand_context_cache: tuple[float, str] | None = None
+BRAND_CONTEXT_CACHE_SECONDS = 60 * 60
+
+
+def invalidate_brand_context_cache() -> None:
+    global _brand_context_cache
+    _brand_context_cache = None
+
 
 class GeneratorService:
     def __init__(self):
@@ -21,12 +30,15 @@ class GeneratorService:
 
     async def _fetch_brand_guidelines(self) -> str:
         """Pulls broad brand context from OpenRAG across all brand primitives."""
+        global _brand_context_cache
+        if _brand_context_cache and time.monotonic() - _brand_context_cache[0] < BRAND_CONTEXT_CACHE_SECONDS:
+            return _brand_context_cache[1]
 
         async def search(query: str):
             try:
                 response = await self.openrag_client.client.post(
                     "/v1/search",
-                    json={"query": query, "limit": 5, "score_threshold": 0},
+                    json={"query": query, "limit": 3, "score_threshold": 0.15},
                 )
                 if response.status_code == 200:
                     results = response.json().get("results", [])
@@ -45,12 +57,14 @@ class GeneratorService:
                 key = s[:120]
                 if key not in seen:
                     seen.add(key)
-                    unique_snippets.append(s[:500])
+                    unique_snippets.append(s[:350])
             if unique_snippets:
                 sections.append(f"--- {query} ---")
                 sections.extend(unique_snippets)
 
-        return "\n\n".join(sections)
+        context = "\n\n".join(sections)
+        _brand_context_cache = (time.monotonic(), context)
+        return context
 
     async def generate_image(self, user_prompt: str) -> dict:
         """

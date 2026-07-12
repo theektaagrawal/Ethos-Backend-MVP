@@ -22,6 +22,33 @@ def replace_mckinley_brand(content, brand_name: str):
     return content
 
 
+def _normalize_source(name: str) -> str:
+    """Normalize a filename for tolerant matching: lowercase, drop extension,
+    drop parenthetical numbers like '(1)', keep alphanumerics only."""
+    name = name.lower().strip()
+    name = re.sub(r'\.\w+$', '', name)       # trailing extension
+    name = re.sub(r'\(\s*\d+\s*\)', '', name)  # (1), (2)
+    name = re.sub(r'[^a-z0-9]', '', name)
+    return name
+
+
+def verify_citations(findings, valid_sources):
+    """Keep only findings whose [Source: X] matches a filename actually returned
+    by retrieval. Findings with no citation, or a citation that matches no
+    retrieved source, are treated as ungrounded and dropped. Returns
+    (kept_findings, dropped_findings)."""
+    norm_valid = {_normalize_source(s) for s in valid_sources if s}
+    kept, dropped = [], []
+    for f in findings:
+        m = re.search(r'\[Source:\s*([^\]]+)\]', f)
+        cited = _normalize_source(m.group(1)) if m else ""
+        matched = bool(cited) and any(
+            cited == v or cited in v or v in cited for v in norm_valid
+        )
+        (kept if matched else dropped).append(f)
+    return kept, dropped
+
+
 class ValidatorService:
     def __init__(self):
         self.openrag_client = get_openrag_client()
@@ -89,13 +116,13 @@ Example Output:
             
         return data.get("queries", [])
 
-    async def _get_targeted_brand_knowledge(self, queries: list[str]) -> str:
+    async def _get_targeted_brand_knowledge(self, queries: list[str], max_characters: int = 7000) -> str:
         """Gathers raw document chunks from OpenRAG based on image analysis queries."""
         async def search_query(query):
             try:
                 response = await self.openrag_client.client.post(
                     "/v1/search",
-                    json={"query": query, "limit": 5, "score_threshold": 0.3},
+                    json={"query": query, "limit": 4, "score_threshold": 0.3},
                 )
                 if response.status_code == 200:
                     results = response.json().get("results", [])
@@ -121,15 +148,24 @@ Example Output:
 
         seen: set[str] = set()
         context_parts: list[str] = []
+        total_characters = 0
         for query, snippets in query_results:
             if snippets:
-                context_parts.append(f"--- Context for: {query} ---")
+                header = f"--- Context for: {query} ---"
+                if total_characters + len(header) >= max_characters:
+                    break
+                context_parts.append(header)
+                total_characters += len(header)
                 for text, filename in snippets:
                     key = text[:120]
                     if key not in seen:
                         seen.add(key)
                         source = f"\n[Source: {filename}]" if filename else ""
-                        context_parts.append(f"{text[:600]}{source}")
+                        snippet = f"{text[:450]}{source}"
+                        if total_characters + len(snippet) > max_characters:
+                            return "\n".join(context_parts)
+                        context_parts.append(snippet)
+                        total_characters += len(snippet)
 
         return "\n".join(context_parts)
 
@@ -154,7 +190,9 @@ Example Output:
             "brand typography fonts capitalization text rules",
             "brand aesthetic philosophy visual style photography",
         ]
-        all_queries = queries + [q for q in primitive_queries if q not in queries]
+        # Keep the evidence request bounded; additional broad searches create
+        # duplicate chunks and inflate the audit prompt without improving grounding.
+        all_queries = (queries[:4] + [q for q in primitive_queries if q not in queries])[:7]
 
         # Fetch two types of context in parallel:
         # 1. Raw chunks via /v1/search → real source citations
@@ -166,7 +204,7 @@ Example Output:
                     json={"message": "Summarize the brand's core aesthetic identity, key visual prohibitions, and defining design principles across all brand primitives."},
                 )
                 if response.status_code == 200:
-                    return response.json().get("response", "").strip()
+                    return response.json().get("response", "").strip()[:3500]
             except Exception:
                 pass
             return ""
@@ -186,11 +224,16 @@ Example Output:
         # Clean brand_knowledge retrieved from database
         brand_knowledge = replace_mckinley_brand(brand_knowledge, brand_name)
 
-        if not brand_knowledge.strip():
-            yield f"data: {json.dumps({'status': 'Warning: No brand knowledge retrieved. Check that OpenRAG has indexed documents.'})}\n\n"
+        # No-context guard: findings must cite [Source:] from retrieved factual
+        # chunks. With no citable brand rules, any "audit" would be the model
+        # free-wheeling on generic design opinion — exactly what we must not do.
+        # Refuse to produce findings rather than emit ungrounded ones.
+        if not factual_chunks.strip():
+            yield f"data: {json.dumps({'status': 'Complete', 'result': {'improvements': [], 'rejections': [], 'reviews': None, 'grounding_warning': 'No brand rules were retrieved from the knowledge base, so no grounded audit could be produced. Confirm OpenRAG has indexed the brand documents.'}})}\n\n"
+            return
 
         yield f"data: {json.dumps({'status': 'Auditing against brand guidelines...'})}\n\n"
-        
+
         prompt = f"""<role_definition>
 You are a strict brand guardian and creative director. Your sole job is to audit the provided draft image against our strict brand rules and primitives.
 </role_definition>
@@ -217,18 +260,18 @@ You are a strict brand guardian and creative director. Your sole job is to audit
 <instructions>
 Analyze the visual content of the provided image and its description. Perform a rigorous, element-by-element brand audit:
 1. **Inspect the Logo/Trademark Color and Styling**:
-   - Check the exact color of the logo in the image (e.g., is it red, green, blue, white, black?).
-   - Cross-reference this color with the approved color versions in <brand_knowledge_context> (e.g., white, black, blue).
-   - If the logo color violates the guidelines (such as using a red logo when only white, black, or blue are allowed), flag it as a rejection and add an improvement to change it to an approved color.
+   - Observe and name the exact color of the logo as it actually appears in the image (e.g., red, green, blue, white, black — report only what you see).
+   - Compare that observed color ONLY against the approved color versions explicitly stated in <brand_knowledge_context>. Do not assume any color is approved or forbidden unless the context says so.
+   - Flag a rejection ONLY if the context explicitly states the observed treatment is not permitted; the corresponding improvement must change it to a color the context explicitly approves.
 2. **Inspect Typography and Text overlays**:
-   - Check the fonts, capitalization, textures (e.g., distressed, clean), and placement.
-   - Verify against typographic rules in the context.
+   - Observe the fonts, capitalization, textures (e.g., distressed, clean), and placement as they appear.
+   - Verify against the typographic rules stated in the context; do not apply typographic preferences that are not in the context.
 3. **Inspect Layout, Sizing, and Safe Area**:
-   - Check the size and position of the logo, promotional badges, and other graphical overlays.
+   - Observe the size and position of the logo, promotional badges, and other graphical overlays, and check them against any layout/safe-area rules stated in the context.
 4. **Identify Violations & Formulate Improvements**:
-   - Identify specific elements that violate any refusals, voice rules, color rules, or layout guidelines in the context.
+   - Identify specific elements that violate a refusal, voice rule, color rule, or layout guideline that is explicitly present in the context.
    - Formulate highly specific, literal visual instructions for how the image MUST be edited to fix these violations.
-   - Do NOT use generic creative-director feedback (like "Simplify the composition" or "Adjust color grade to be more natural"). Instead, dictate exactly what needs to change visually and literally (e.g., "Change the red logo in the top-left corner to white", "Remove the red '2025' arrival badge from the top-right", "Remove the distressed/grunge effect from the text").
+   - Do NOT use generic creative-director feedback (like "Simplify the composition" or "Adjust color grade to be more natural"). Dictate exactly what must change, literally (e.g., "Change the top-left logo to an approved color stated in the context", "Remove the '2025' arrival badge from the top-right", "Remove the distressed/grunge effect from the text").
 </instructions>
 
 <structured_output_contract>
@@ -277,6 +320,20 @@ Example Output:
         
         content = response.choices[0].message.content
         audit_data = json.loads(content)
+
+        # Citation verification: drop any finding whose [Source:] does not match a
+        # filename actually retrieved from the knowledge base. This blocks
+        # fabricated citations from passing as grounded brand findings.
+        valid_sources = set(re.findall(r'\[Source:\s*([^\]]+)\]', factual_chunks))
+        kept_imp, dropped_imp = verify_citations(audit_data.get('improvements', []), valid_sources)
+        kept_rej, dropped_rej = verify_citations(audit_data.get('rejections', []), valid_sources)
+        if settings.debug and (dropped_imp or dropped_rej):
+            print(f"--- DEBUG: DROPPED UNGROUNDED FINDINGS (citation not in retrieved sources) ---")
+            for f in dropped_imp + dropped_rej:
+                print(f"  DROPPED: {f}")
+            print(f"  valid_sources: {valid_sources}")
+        audit_data['improvements'] = kept_imp
+        audit_data['rejections'] = kept_rej
 
         yield f"data: {json.dumps({'status': 'Gathering stakeholder feedback...'})}\n\n"
 
@@ -334,12 +391,10 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
 
         yield f"data: {json.dumps({'status': 'Complete', 'result': audit_data})}\n\n"
 
-    async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list, brand_name: str = "McKINLEY"):
+    async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list, brand_name: str = "McKINLEY", previous_response_id: str = None):
         if "," in image_base64:
             image_base64 = image_base64.split(",")[1]
-            
-        image_bytes = base64.b64decode(image_base64)
-        
+
         # Clean input text variables
         description = replace_mckinley_brand(description, brand_name)
         improvements = replace_mckinley_brand(improvements, brand_name)
@@ -370,7 +425,7 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
         yield f"data: {json.dumps({'status': 'Synthesizing visual edit instructions...'})}\n\n"
 
         synthesis_prompt = f"""<role_definition>
-You are an expert prompt engineer for an image editing AI. Your job is to translate complex brand guidelines, required improvements, and rejections into a single, concise paragraph of edit instructions.
+You are an expert prompt engineer for an image editing AI. Your job is to translate brand guidelines, required improvements, and rejections into an explicit, prioritized edit instruction for an image editor.
 </role_definition>
 
 <original_image_description>
@@ -390,11 +445,21 @@ You are an expert prompt engineer for an image editing AI. Your job is to transl
 </violations_to_remove>
 
 <instructions>
-Write a cohesive prompt for the image editor (maximum 800 characters) that tells it exactly what to change to fix the violations, while heavily injecting the brand's unique aesthetics, lighting, mood, and visual style.
-- Include concrete, specific, and direct instructions for the mechanical edits (e.g., "Change the red logo in the top-left corner to a clean solid white logo").
-- Explicitly integrate the brand's required aesthetics, mood, and photography style from the <brand_knowledge> to ensure the final image maintains the premium brand nuance.
+Write an edit instruction for the image editor that makes EVERY violation and improvement land. Keep it as concise as possible while including every mandatory edit; only the closing aesthetic paragraph should be trimmed for length. Structure it exactly like this, in this order:
+
+1. Open with one sentence: "Apply every numbered edit below; all are mandatory. Change ONLY what these edits name and preserve every other element of the image exactly."
+2. A numbered list of MECHANICAL edits, most consequential first. Each item must be concrete and spatial, naming what to change and where (e.g. "1. Change the red mountain logo in the top-left corner to the approved solid blue logo lockup."). Prioritize in this order: (a) removals/deletions of prohibited text, badges, or slogans; (b) text edits such as replacing or restyling a headline; (c) logo/color/trademark corrections; (d) layout and product-in-context fixes. State removals bluntly (e.g. "Completely remove the 'NEW ARRIVAL 2025' badge and the 'NO LIMITS' brush lettering; leave that area as clean background.").
+3. A final PRESERVATION sentence phrased as "Change only what the numbered edits require and keep everything else identical." Explicitly name the important elements that must stay UNCHANGED — every element visible in <original_image_description> that no numbered edit touches (e.g. the product and the model, the price block, the feature bullet list, the logo). Then add these invariants, each scoped with "unless a numbered edit above requires it": do not alter the overall layout, composition, camera angle, cropping, color grade, or lighting; and never add new text, captions, watermarks, badges, or logos that no edit called for. The editor both drops unmentioned elements and invents new ones, so this clause is mandatory and specific.
+4. Apply the brand's aesthetics from <brand_knowledge> IN SERVICE OF THE NUMBERED EDITS — no more, no less. If a numbered edit is itself aesthetic and global (e.g. a finding that the scene violates the brand's photography style — too staged, wrong lighting or mood), apply it fully, including relighting, re-staging, or re-grading the whole scene as that finding requires. But do NOT invent aesthetic changes that no finding calls for: never restyle, re-grade, or relight elements that no numbered edit touches.
+
+Rules:
+- Deletions and text edits are the highest priority — never omit or soften them to save space; drop aesthetic detail before dropping a mechanical edit.
+- Only remove an element if a violation explicitly calls for its removal. Never remove price, product, feature bullets, logo, or supporting copy unless a numbered edit names it — list them in the preservation sentence instead.
+- RESOLVE EVERY ABSTRACTION TO A CONCRETE VALUE. The image editor cannot interpret vague direction like "a product-specific headline" or "on-brand copy" — it can only render literal text. When an improvement is abstract, replace it with the exact literal string to render, inferred from the product and brand facts in <original_image_description> and <brand_knowledge> (e.g. turn "change to a product-specific headline" into: change the headline text to read "X-PRO 3L JACKET"). Never pass an abstract instruction through to the editor.
+- Always wrap the exact in-image text to render in double quotes so the editor renders it verbatim and adds no extra characters (e.g. render the headline exactly as "X-PRO 3L JACKET").
+- When brand rules specify a typeface, DO name it (e.g. "Work Sans Medium") AND add a short visible-style descriptor alongside it as a fallback (e.g. 'set the headline in Work Sans Medium — uppercase, clean geometric sans-serif, medium weight'). The name anchors the look for the editor; the descriptor covers the approximation.
 - Do NOT include any citations or source names.
-- Do not write anything outside of the final prompt itself.
+- Do not write anything outside of the final edit instruction itself.
 </instructions>
 """
 
@@ -413,22 +478,40 @@ Write a cohesive prompt for the image editor (maximum 800 characters) that tells
         if settings.debug:
             print("--- DEBUG: SYNTHESIZED IMAGE EDIT PROMPT ---")
             print(final_edit_prompt)
-            print("--------------------------------------------")
+            print(f"--- previous_response_id: {previous_response_id} ---")
             start_time = time.time()
 
-        result = await self.openai_client.images.edit(
-            model=settings.openai_image_model,
-            image=[("image.png", image_bytes)],
-            prompt=final_edit_prompt
+        # Multi-turn, context-preserving edit via the Responses API image tool.
+        # First turn sends the original image inline; subsequent turns omit it and
+        # reference the model's own prior image through previous_response_id, which
+        # preserves far more fidelity than re-uploading a flattened frame.
+        if previous_response_id:
+            user_content = [{"type": "input_text", "text": final_edit_prompt}]
+        else:
+            user_content = [
+                {"type": "input_text", "text": final_edit_prompt},
+                {"type": "input_image", "image_url": f"data:image/png;base64,{image_base64}"},
+            ]
+
+        response = await self.openai_client.responses.create(
+            model=settings.openai_responses_model,
+            previous_response_id=previous_response_id,
+            input=[{"role": "user", "content": user_content}],
+            tools=[{"type": "image_generation"}],
         )
-        
+
         if settings.debug:
             elapsed = time.time() - start_time
-            print(f"--- DEBUG: IMAGE EDIT API CALL TOOK {elapsed:.2f} seconds ---")
-            
-        new_image_base64 = result.data[0].b64_json
+            print(f"--- DEBUG: RESPONSES EDIT CALL TOOK {elapsed:.2f} seconds ---")
 
-        yield f"data: {json.dumps({'status': 'Complete', 'result': {'image_base64': f'data:image/png;base64,{new_image_base64}'}})}\n\n"
+        image_calls = [o for o in response.output if getattr(o, "type", None) == "image_generation_call"]
+        new_image_base64 = image_calls[0].result if image_calls else None
+
+        if not new_image_base64:
+            yield f"data: {json.dumps({'status': 'Error', 'error': 'The image tool did not return an edited image.'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'status': 'Complete', 'result': {'image_base64': f'data:image/png;base64,{new_image_base64}', 'response_id': response.id}})}\n\n"
 
 _validator_service_instance = None
 

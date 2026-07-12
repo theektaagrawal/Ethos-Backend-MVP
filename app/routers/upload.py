@@ -273,6 +273,8 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             "size": len(content)
         }
         save_document(doc_data)
+        from app.services.generator_service import invalidate_brand_context_cache
+        invalidate_brand_context_cache()
 
         if response.status_code != 200:
             print(f"OpenRAG returned status {response.status_code}: {response.text}")
@@ -293,6 +295,8 @@ async def upload_file(file: UploadFile = File(...), client: OpenRAGClient = Depe
             "size": len(content)
         }
         save_document(doc_data)
+        from app.services.generator_service import invalidate_brand_context_cache
+        invalidate_brand_context_cache()
         return {"status": "success", "message": f"File uploaded (mock fallback, error: {e})"}
 
 class UrlIngestRequest(BaseModel):

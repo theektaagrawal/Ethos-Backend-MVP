@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-5.4-mini"
     openai_image_model: str = "gpt-image-2"
     openai_audio_model: str = "whisper-1"
+    # Mainline model that hosts the Responses API image_generation tool for
+    # multi-turn, context-preserving draft edits. Must be a model on OpenAI's
+    # image_generation tool support list (the tool picks the GPT Image model).
+    # NOTE: gpt-5-mini is NOT on that list; gpt-5.4-mini IS, so we use it here
+    # for image edits even if chat/audit run on gpt-5-mini elsewhere.
+    openai_responses_model: str = "gpt-5.4-mini"
 
     # Debugging
     debug: bool = False
