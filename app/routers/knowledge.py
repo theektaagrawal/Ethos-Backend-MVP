@@ -323,7 +323,8 @@ async def get_3d_graph(
                                     "label": label_str,
                                     "type": str(props.get("entity_type", "concept")).lower(),
                                     "sub": str(props.get("description", "Extracted via LightRAG"))[:500],
-                                    "weight": float(props.get("weight", 1) or 1),
+                                    # Real degree assigned in the pass below, once edges exist.
+                                    "weight": 0.0,
                                     "labels": labels if isinstance(labels, list) else [label_str],
                                     "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
                                     "file_path": props.get("file_path"),
@@ -345,6 +346,19 @@ async def get_3d_graph(
                                     "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
                                     "properties": props,
                                 })
+
+                    # Node degree drives visual size, which is what makes LightRAG's own
+                    # graph UI legible: a big hub, secondary hubs, tiny leaves. LightRAG
+                    # returns no weight property, so defaulting it to 1 sized every node
+                    # identically and flattened that hierarchy into confetti. Count the
+                    # real connections instead.
+                    degree: dict[str, int] = {}
+                    for e in edges:
+                        degree[e["source"]] = degree.get(e["source"], 0) + 1
+                        degree[e["target"]] = degree.get(e["target"], 0) + 1
+                    for n in nodes:
+                        n["weight"] = float(degree.get(n["id"], 0))
+
                     is_truncated = bool(data.get("is_truncated", False))
                 else:
                     is_truncated = False
