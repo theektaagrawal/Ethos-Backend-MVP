@@ -113,27 +113,38 @@ def verify_findings(findings, valid_sources):
     return kept, dropped
 
 
-def build_edit_prompt(fixes: list[str], preserve: list[str]) -> str:
-    """Assemble the image-editor instruction deterministically. Every line traces to a
-    verified finding; the preserve list is the audit's actual element inventory. The
-    structure and lock language follow OpenAI's image-gen prompting guide: state the
-    deliverable, skimmable numbered edits, explicit invariants, verbatim-text and
-    person-identity locks, repeated on every iteration."""
+def build_recreation_brief(fixes: list[str], preserve: list[str], brand_guidelines: str) -> str:
+    """Assemble a creative brief for RECREATING the draft on-brand, deterministically.
+
+    This deliberately mirrors the generator's recipe (broad brand context + creative-
+    director framing), which produces far more coherent results than surgical numbered
+    edits: gpt-image models compose a whole image well and partial-edit poorly (ignored
+    edits, corrupted text, invented elements). The attached draft is a creative
+    REFERENCE — same product, people, and scene concept — not pixels to preserve."""
     lines = [
-        "You are editing a professional brand marketing advertisement. Apply every numbered edit below; all are mandatory. Change ONLY what these edits name and preserve every other element of the image exactly.",
+        "You are a professional creative director recreating a brand advertisement so it is fully on-brand and photorealistic. The attached image is the previous draft: treat it as the creative reference for the product, the people, and the scene concept — not as pixels to preserve.",
         "",
     ]
-    for i, fix in enumerate(fixes, 1):
-        lines.append(f"{i}. {fix}")
-    lines.append("")
+    if brand_guidelines:
+        lines.extend([
+            "=== BRAND GUIDELINES ===",
+            brand_guidelines,
+            "=== END BRAND GUIDELINES ===",
+            "",
+        ])
     if preserve:
         lines.append(
-            "Keep these elements exactly as they are, completely unchanged: "
-            + "; ".join(preserve) + "."
+            "Carry over from the reference: " + "; ".join(preserve) + "."
         )
-    # Letter-by-letter spellings for the short quoted strings in the edits. Image
-    # models corrupt exactly these (rendered "NO LIMITS" as "NO LIMIITS"); the
-    # OpenAI prompting guide's remedy is spelling tricky words out explicitly.
+    if fixes:
+        lines.append("The reference violates the brand in these ways — the new advertisement must correct every one of them:")
+        for i, fix in enumerate(fixes, 1):
+            lines.append(f"{i}. {fix}")
+    lines.append("")
+
+    # Letter-by-letter spellings for the short quoted strings in the corrections.
+    # Image models corrupt exactly these (rendered "NO LIMITS" as "NO LIMIITS");
+    # the OpenAI prompting guide's remedy is spelling tricky words out explicitly.
     spelled: list[str] = []
     seen_quotes: set[str] = set()
     for fix in fixes:
@@ -141,18 +152,13 @@ def build_edit_prompt(fixes: list[str], preserve: list[str]) -> str:
             if q not in seen_quotes and any(c.isalnum() for c in q):
                 seen_quotes.add(q)
                 spelled.append(f'"{q}" = ' + ", ".join("space" if c == " " else c for c in q))
-    spell_lines = (
-        ["Exact spellings of the text above, letter by letter: " + " | ".join(spelled[:8]) + "."]
-        if spelled else []
-    )
+    if spelled:
+        lines.append("Exact spellings, letter by letter: " + " | ".join(spelled[:8]) + ".")
 
-    lines.extend(spell_lines + [
-        "If people appear, keep each person's face, body shape, pose, hair, and expression exactly unchanged unless a numbered edit targets them.",
+    lines.extend([
         "Render every quoted string verbatim, character for character — no extra characters, no omissions, no respelling.",
-        "When an edit changes text or its styling, keep that text block's position, size, and alignment unchanged unless the edit states otherwise.",
-        "Do not alter the overall layout, composition, camera angle, cropping, color grade, "
-        "saturation, contrast, or lighting unless a numbered edit above explicitly requires it. "
-        "Never add new text, captions, badges, watermarks, or logos that no numbered edit calls for.",
+        "Do not add any text, slogans, badges, watermarks, or logos beyond what the corrections call for, and never invent claims, taglines, or heritage facts the brand guidelines do not support.",
+        "The result must feel premium, authentic, and wholly aligned with the brand's aesthetic philosophy, voice, and refusals.",
     ])
     return "\n".join(lines)
 
@@ -509,21 +515,28 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
         fixes = replace_mckinley_brand(fixes, brand_name)
         preserve_list = replace_mckinley_brand([str(p).strip() for p in (preserve or []) if str(p).strip()], brand_name)
 
-        final_edit_prompt = build_edit_prompt(fixes, preserve_list)
+        # Same broad brand context (and same 1-hour cache) the generator uses — its
+        # output quality is the benchmark this recreation flow deliberately mirrors.
+        from app.services.generator_service import get_generator_service
+        brand_guidelines = replace_mckinley_brand(
+            await get_generator_service()._fetch_brand_guidelines(), brand_name
+        )
 
-        _vlog("APPLY START",
+        final_edit_prompt = build_recreation_brief(fixes, preserve_list, brand_guidelines)
+
+        _vlog("APPLY START (recreation mode)",
               f"structured_findings={bool(findings)} fixes={len(fixes)} preserve={len(preserve_list)} "
+              f"brand_guidelines_chars={len(brand_guidelines)} "
               f"previous_response_id={previous_response_id} quality={settings.openai_image_quality}")
-        _vlog("DETERMINISTIC IMAGE EDIT PROMPT (sent to image editor)", final_edit_prompt)
+        _vlog("RECREATION BRIEF (sent to image model)", final_edit_prompt)
 
-        yield f"data: {json.dumps({'status': 'Generating improved draft...'})}\n\n"
+        yield f"data: {json.dumps({'status': 'Generating on-brand draft...'})}\n\n"
 
         start_time = time.time()
 
-        # Multi-turn, context-preserving edit via the Responses API image tool.
-        # First turn sends the original image inline; subsequent turns omit it and
-        # reference the model's own prior image through previous_response_id, which
-        # preserves far more fidelity than re-uploading a flattened frame.
+        # Multi-turn via the Responses API image tool. First turn attaches the draft as
+        # the creative reference; iterate turns reference the model's own prior image
+        # through previous_response_id.
         if previous_response_id:
             user_content = [{"type": "input_text", "text": final_edit_prompt}]
         else:
