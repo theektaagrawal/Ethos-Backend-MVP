@@ -323,7 +323,8 @@ async def get_3d_graph(
                                     "label": label_str,
                                     "type": str(props.get("entity_type", "concept")).lower(),
                                     "sub": str(props.get("description", "Extracted via LightRAG"))[:500],
-                                    "weight": float(props.get("weight", 1) or 1),
+                                    # Real value assigned in the degree pass below, once edges exist.
+                                    "weight": 0.0,
                                     "labels": labels if isinstance(labels, list) else [label_str],
                                     "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
                                     "file_path": props.get("file_path"),
@@ -345,6 +346,18 @@ async def get_3d_graph(
                                     "source_ids": _as_string_list(props.get("source_ids", props.get("source_id"))),
                                     "properties": props,
                                 })
+
+                    # Node weight drives visual size on the frontend. LightRAG returns no
+                    # weight property, so defaulting it to 1 gave every node the same value
+                    # and made node size carry no information at all. Derive it from real
+                    # graph degree so well-connected entities actually read as hubs.
+                    degree: dict[str, int] = {}
+                    for e in edges:
+                        degree[e["source"]] = degree.get(e["source"], 0) + 1
+                        degree[e["target"]] = degree.get(e["target"], 0) + 1
+                    for n in nodes:
+                        n["weight"] = float(degree.get(n["id"], 0))
+
                     is_truncated = bool(data.get("is_truncated", False))
                 else:
                     is_truncated = False
