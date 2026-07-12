@@ -7,6 +7,15 @@ from app.services.openrag_client import get_openrag_client
 
 from app.config import settings
 
+def _vlog(title: str, content=""):
+    """Unconditional step logging for the validator pipeline. Everything the audit
+    retrieves, decides, and sends to the editor lands in stdout (docker logs folio),
+    so a bad result can be diagnosed from the exact intermediate artifacts."""
+    print(f"\n===== [VALIDATOR] {title} =====", flush=True)
+    if content:
+        print(content, flush=True)
+
+
 def replace_mckinley_brand(content, brand_name: str):
     if not brand_name:
         return content
@@ -102,9 +111,12 @@ def verify_findings(findings, valid_sources):
 
 def build_edit_prompt(fixes: list[str], preserve: list[str]) -> str:
     """Assemble the image-editor instruction deterministically. Every line traces to a
-    verified finding; the preserve list is the audit's actual element inventory."""
+    verified finding; the preserve list is the audit's actual element inventory. The
+    structure and lock language follow OpenAI's image-gen prompting guide: state the
+    deliverable, skimmable numbered edits, explicit invariants, verbatim-text and
+    person-identity locks, repeated on every iteration."""
     lines = [
-        "Apply every numbered edit below; all are mandatory. Change ONLY what these edits name and preserve every other element of the image exactly.",
+        "You are editing a professional brand marketing advertisement. Apply every numbered edit below; all are mandatory. Change ONLY what these edits name and preserve every other element of the image exactly.",
         "",
     ]
     for i, fix in enumerate(fixes, 1):
@@ -115,11 +127,14 @@ def build_edit_prompt(fixes: list[str], preserve: list[str]) -> str:
             "Keep these elements exactly as they are, completely unchanged: "
             + "; ".join(preserve) + "."
         )
-    lines.append(
+    lines.extend([
+        "If people appear, keep each person's face, body shape, pose, hair, and expression exactly unchanged unless a numbered edit targets them.",
+        "Render every quoted string verbatim, character for character — no extra characters, no omissions, no respelling.",
+        "When an edit changes text or its styling, keep that text block's position, size, and alignment unchanged unless the edit states otherwise.",
         "Do not alter the overall layout, composition, camera angle, cropping, color grade, "
-        "or lighting unless a numbered edit above explicitly requires it. Never add new text, "
-        "captions, badges, watermarks, or logos that no numbered edit calls for."
-    )
+        "saturation, contrast, or lighting unless a numbered edit above explicitly requires it. "
+        "Never add new text, captions, badges, watermarks, or logos that no numbered edit calls for.",
+    ])
     return "\n".join(lines)
 
 
@@ -229,12 +244,21 @@ class ValidatorService:
         # Clean description
         description = replace_mckinley_brand(description, brand_name)
 
+        _vlog("AUDIT START", f"brand={brand_name} mime={mime} description={description!r} previous_fixes={len(previous_fixes or [])}")
+        if previous_fixes:
+            _vlog("PREVIOUS FIXES (iteration memory)", "\n".join(f"- {f}" for f in previous_fixes))
+
         yield f"data: {json.dumps({'status': 'Consulting brand knowledge base...'})}\n\n"
 
+        retrieval_start = time.time()
         relational_ctx, factual_chunks = await asyncio.gather(
             self._get_relational_context(),
             self._get_targeted_brand_knowledge(AUDIT_RULE_QUERIES),
         )
+        _vlog(f"RETRIEVAL DONE in {time.time() - retrieval_start:.2f}s",
+              f"relational_ctx chars={len(relational_ctx)} factual_chunks chars={len(factual_chunks)}")
+        _vlog("RELATIONAL CONTEXT (/v1/chat -> LightRAG-aware agent)", relational_ctx or "(empty)")
+        _vlog("FACTUAL CHUNKS (/v1/search)", factual_chunks or "(empty)")
 
         sections = []
         if relational_ctx:
@@ -258,7 +282,7 @@ class ValidatorService:
 <previous_round_edits>
 The following edits were already applied to produce the draft you are inspecting:
 {fixes_lines}
-Do not flag an element for the same rule these edits already addressed unless the image still clearly violates that rule. An element is never a violation merely because it was edited in a previous round.
+For any element one of these edits already addressed, re-flag it ONLY if you can name the specific visible evidence that it still violates the rule (e.g. "the headline still shows a distressed grunge texture"). If compliance is ambiguous at the pixel level — such as a dark logo that plausibly is the approved dark blue, or clean sans-serif text that plausibly is the documented typeface — treat the element as COMPLIANT and preserve it. An element is never a violation merely because it was edited in a previous round.
 </previous_round_edits>
 """
 
@@ -273,6 +297,13 @@ You are a brand compliance auditor. You inspect a draft marketing image against 
 - If the context contains no rule covering an element, that element is COMPLIANT by default — do not flag it.
 - If the draft violates nothing, return an empty findings list. A clean audit is a valid and expected outcome; do not manufacture findings to appear thorough.
 </grounding_rules>
+
+<verifiability_rules>
+Only flag what you can actually SEE in the image. Never flag an element because a property cannot be positively confirmed from a rendered image.
+- Typeface identity is NOT verifiable from pixels: never flag text merely because you "cannot confirm" it is the documented typeface. Flag typography only on a VISIBLE deviation — wrong capitalization, or a decorative, script, serif, distressed, or hand-drawn treatment that clearly is not the brand's clean sans-serif.
+- Colors must be judged with perceptual tolerance: approved brand colors can look close to other colors in a photo (a very dark approved blue reads as near-black). If an element's color plausibly matches an approved value, it is compliant; flag color only on a clear mismatch (e.g. red where only blue, black, or white are approved).
+- Each violation must name the visible evidence ("the headline letterforms have a distressed grunge texture"), not an unverifiable assertion ("the text is not in the documented typeface system").
+</verifiability_rules>
 
 <brand_knowledge_context>
 {brand_knowledge}
@@ -289,9 +320,10 @@ PASS 1 — INVENTORY. List every distinct visual element in the image: each logo
 
 PASS 2 — AUDIT. Check each inventoried element against the explicit rules in <brand_knowledge_context>:
 - An element receives AT MOST ONE finding, with exactly one verdict:
-  - "restyle": the element stays but must change (color, typeface, wording, treatment). The fix must state the exact target using literal values from the context — the exact approved color name, the exact typeface, the exact replacement text in double quotes.
+  - "restyle": the element stays but must change (color, typeface, wording, treatment). The fix must state the exact target using literal values from the context — the exact approved color name, the exact typeface, the exact replacement text in double quotes. When the target is a color, give a plain-language description alongside any code, because the image editor acts on descriptions, not hex values (e.g. 'the approved brand blue #002539 — a very dark navy, almost black').
   - "remove": the element is prohibited by a rule in the context and must be deleted entirely.
 - Never issue two findings for the same element, and never restyle an element you also consider prohibited — decide which single verdict the rules actually support.
+- When a fix changes photographic style or scene staging, describe the target in concrete photographic language — lighting direction and quality, candid/unposed framing, natural textures — not abstract adjectives (write "relight with soft natural daylight, candid unposed moment, no dramatic sunset grading", not "make it more authentic").
 - Every element with no finding goes into "preserve" — this list is the editor's manifest of what must not change, so it must be complete.
 - Each fix must be a self-contained, concrete, spatial instruction an image editor can execute with no other context.
 </instructions>
@@ -314,11 +346,8 @@ Return ONLY a JSON object:
 Do not add any prose or markdown outside the JSON object.
 </structured_output_contract>
 """
-        if settings.debug:
-            print("--- DEBUG: AUDIT PROMPT ---")
-            print(prompt)
-            print("---------------------------")
-            start_time = time.time()
+        _vlog("AUDIT PROMPT (sent to vision model)", prompt)
+        start_time = time.time()
 
         response = await self.openai_client.chat.completions.create(
             model=settings.openai_chat_model,
@@ -340,13 +369,13 @@ Do not add any prose or markdown outside the JSON object.
             ]
         )
 
-        if settings.debug:
-            elapsed = time.time() - start_time
-            print(f"--- DEBUG: AUDIT API CALL TOOK {elapsed:.2f} seconds ---")
+        _vlog(f"AUDIT MODEL CALL took {time.time() - start_time:.2f}s")
+        _vlog("RAW AUDIT MODEL OUTPUT", response.choices[0].message.content)
 
         try:
             audit_data = json.loads(response.choices[0].message.content)
         except (json.JSONDecodeError, TypeError):
+            _vlog("AUDIT PARSE FAILED — malformed JSON from model")
             yield f"data: {json.dumps({'status': 'Error', 'error': 'The audit model returned malformed output. Please retry.'})}\n\n"
             return
 
@@ -355,11 +384,11 @@ Do not add any prose or markdown outside the JSON object.
         # search and the relational graph synthesis count).
         valid_sources = _extract_cited_sources(factual_chunks) | _extract_cited_sources(relational_ctx)
         kept, dropped = verify_findings(audit_data.get("findings"), valid_sources)
-        if settings.debug and dropped:
-            print("--- DEBUG: DROPPED FINDINGS (schema/contradiction/citation) ---")
-            for f in dropped:
-                print(f"  DROPPED: {f}")
-            print(f"  valid_sources: {valid_sources}")
+        _vlog("VALID SOURCES (retrieved documents findings may cite)", "\n".join(sorted(valid_sources)) or "(none)")
+        _vlog(f"FINDINGS VERIFIED: kept={len(kept)} dropped={len(dropped)}")
+        if dropped:
+            _vlog("DROPPED FINDINGS (schema violation / duplicate element / bad citation)",
+                  "\n".join(json.dumps(f) for f in dropped))
 
         preserve = [str(p).strip() for p in audit_data.get("preserve", []) if str(p).strip()][:25]
 
@@ -373,6 +402,7 @@ Do not add any prose or markdown outside the JSON object.
             "reviews": None,
         }
         result = replace_mckinley_brand(result, brand_name)
+        _vlog("FINAL AUDIT RESULT", json.dumps(result, indent=2))
 
         # Yield findings immediately — the stakeholder reviews below are presentational
         # and must not delay the actual audit result.
@@ -423,9 +453,6 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             # Reviews are theater; their failure must never sink a finished audit.
             pass
 
-        if settings.debug:
-            print(f"--- DEBUG: FULL AUDIT RESULT: {json.dumps(result, indent=2)} ---")
-
     async def apply_image_improvements(self, image_base64: str, description: str, improvements: list, rejections: list, brand_name: str = "McKINLEY", previous_response_id: str = None, findings: list | None = None, preserve: list | None = None):
         mime, image_payload = _split_data_url(image_base64)
 
@@ -454,13 +481,14 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
 
         final_edit_prompt = build_edit_prompt(fixes, preserve_list)
 
+        _vlog("APPLY START",
+              f"structured_findings={bool(findings)} fixes={len(fixes)} preserve={len(preserve_list)} "
+              f"previous_response_id={previous_response_id} quality={settings.openai_image_quality}")
+        _vlog("DETERMINISTIC IMAGE EDIT PROMPT (sent to image editor)", final_edit_prompt)
+
         yield f"data: {json.dumps({'status': 'Generating improved draft...'})}\n\n"
 
-        if settings.debug:
-            print("--- DEBUG: DETERMINISTIC IMAGE EDIT PROMPT ---")
-            print(final_edit_prompt)
-            print(f"--- previous_response_id: {previous_response_id} ---")
-            start_time = time.time()
+        start_time = time.time()
 
         # Multi-turn, context-preserving edit via the Responses API image tool.
         # First turn sends the original image inline; subsequent turns omit it and
@@ -478,17 +506,17 @@ Output ONLY a JSON object with the exact keys: "founder", "cbo", "brand_critic".
             model=settings.openai_responses_model,
             previous_response_id=previous_response_id,
             input=[{"role": "user", "content": user_content}],
-            tools=[{"type": "image_generation"}],
+            tools=[{"type": "image_generation", "quality": settings.openai_image_quality}],
         )
 
-        if settings.debug:
-            elapsed = time.time() - start_time
-            print(f"--- DEBUG: RESPONSES EDIT CALL TOOK {elapsed:.2f} seconds ---")
+        _vlog(f"IMAGE EDIT CALL took {time.time() - start_time:.2f}s",
+              f"response_id={response.id} output_types={[getattr(o, 'type', None) for o in response.output]}")
 
         image_calls = [o for o in response.output if getattr(o, "type", None) == "image_generation_call"]
         new_image_base64 = image_calls[0].result if image_calls else None
 
         if not new_image_base64:
+            _vlog("IMAGE EDIT RETURNED NO IMAGE")
             yield f"data: {json.dumps({'status': 'Error', 'error': 'The image tool did not return an edited image.'})}\n\n"
             return
 

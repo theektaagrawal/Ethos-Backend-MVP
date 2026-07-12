@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # NOTE: gpt-5-mini is NOT on that list; gpt-5.4-mini IS, so we use it here
     # for image edits even if chat/audit run on gpt-5-mini elsewhere.
     openai_responses_model: str = "gpt-5.4-mini"
+    # Image tool quality. OpenAI's prompting guide says small text and multi-font
+    # layouts (our ads: feature bullets, price, spec blocks) need medium or high;
+    # "auto" may pick lower. High costs ~4x medium per image — tune via env if
+    # spend matters more than text fidelity.
+    openai_image_quality: str = "high"
 
     # Debugging
     debug: bool = False
